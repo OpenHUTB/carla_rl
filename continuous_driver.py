@@ -116,7 +116,7 @@ def runner():
     if env.map.name == "Town07":
         spectator = env.world.get_spectator()
         location = carla.Location(x=-66.9, y=-34.1, z=270)  # 通过选中虚幻编辑器中场景中间对象的坐标来获取（需要除以100，将厘米转成米）
-        rotation = carla.Rotation(pitch=-90, yaw=0, roll=0)  # 俯仰角-90表示俯视
+        rotation = carla.Rotation(pitch=-90, yaw=0, roll=180)  # 俯仰角-90表示俯视，横滚角180表示旋转180度
         new_transform = carla.Transform(location, rotation)
         spectator.set_transform(new_transform)
         pass
