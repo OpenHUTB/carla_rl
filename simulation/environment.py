@@ -21,11 +21,11 @@ class CarlaEnvironment():
         self.settings = None
         self.current_waypoint_index = 0
         self.checkpoint_waypoint_index = 0
-        self.fresh_start=True
+        self.fresh_start = True
         self.checkpoint_frequency = checkpoint_frequency
         self.route_waypoints = None
         self.town = town
-        
+
         # Objects to be kept alive
         self.camera_obj = None
         self.env_camera_obj = None
@@ -38,9 +38,14 @@ class CarlaEnvironment():
         self.walker_list = list()
         self.create_pedestrians()
 
+        self.image_obs = None
+        self.control_obs = None
+        self.speed_obs = None
+
     # A reset function for reseting our environment.
     def reset(self):
         try:
+            # 销毁上一回合创建的车辆和传感器
             if len(self.actor_list) != 0 or len(self.sensor_list) != 0:
                 self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
                 self.client.apply_batch([carla.command.DestroyActor(x) for x in self.actor_list])
@@ -48,47 +53,59 @@ class CarlaEnvironment():
                 self.actor_list.clear()
             self.remove_sensors()
 
-            # Blueprint of our main vehicle
+            # 从蓝图库选择指定车型
             vehicle_bp = self.get_vehicle(CAR_NAME)
 
+            # 根据地图选择初始位置
             if self.town == "Town07":
-                transform = self.map.get_spawn_points()[38] #Town7  is 38 
+                transform = self.map.get_spawn_points()[38]  # Town7  is 38
                 self.total_distance = 750
             elif self.town == "Town02":
-                transform = self.map.get_spawn_points()[1] #Town2 is 1
+                transform = self.map.get_spawn_points()[1]  # Town2 is 1
                 self.total_distance = 780
             else:
+                # 随机出生点
                 transform = random.choice(self.map.get_spawn_points())
                 self.total_distance = 250
-
+            # 生成车辆
             self.vehicle = self.world.try_spawn_actor(vehicle_bp, transform)
             self.actor_list.append(self.vehicle)
 
-            # Camera Sensor
+            # 在车辆放置语义分割相机并监听
             self.camera_obj = CameraSensor(self.vehicle)
-            while(len(self.camera_obj.front_camera) == 0):
+            while (len(self.camera_obj.front_camera) == 0):
                 time.sleep(0.0001)
-            self.image_obs = self.camera_obj.front_camera.pop(-1)
+            # 1. 获取单帧图像 [H,W,C]格式
+            self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 获取最新图像, 保持List[List]结构兼容原有接口
             self.sensor_list.append(self.camera_obj.sensor)
+            # 2. 控制命令（初始化为零）
+            self.control_obs = [np.zeros(4, dtype=np.float32)]  # [throttle, steer, brake, gear]
+            # 3. 速度
+            current_speed = self.vehicle.get_velocity()
+            self.speed_obs = [np.array([current_speed], dtype=np.float32)]
 
-            # Third person view of our vehicle in the Simulated env
+            # 第三人称视角，pygame显示
             if self.display_on:
                 self.env_camera_obj = CameraSensorEnv(self.vehicle)
                 self.sensor_list.append(self.env_camera_obj.sensor)
 
-            # Collision sensor
+            # 碰撞传感器
             self.collision_obj = CollisionSensor(self.vehicle)
             self.collision_history = self.collision_obj.collision_data
             self.sensor_list.append(self.collision_obj.sensor)
 
-            self.timesteps = 0
-            self.rotation = self.vehicle.get_transform().rotation.yaw
-            self.previous_location = self.vehicle.get_location()
+            # 状态变量初始化
+            self.timesteps = 0  # 回合步数计数器
+            self.rotation = self.vehicle.get_transform().rotation.yaw  # 初始偏航角
+            self.previous_location = self.vehicle.get_location()  # 记录初始位置
+            # 度量指标清零
             self.distance_traveled = 0.0
             self.center_lane_deviation = 0.0
-            self.target_speed = 22 #km/h
+            # 速度控制参数
+            self.target_speed = 22  # km/h
             self.max_speed = 25.0
             self.min_speed = 15.0
+            # 车道保持参数
             self.max_distance_from_center = 3
             self.throttle = float(0.0)
             self.previous_steer = float(0.0)
@@ -98,11 +115,14 @@ class CarlaEnvironment():
             self.center_lane_deviation = 0.0
             self.distance_covered = 0.0
 
+            # 路径点生成
+            # 全新回合路径
             if self.fresh_start:
                 self.current_waypoint_index = 0
                 # Waypoint nearby angle and distance from it
                 self.route_waypoints = list()
-                self.waypoint = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving))
+                self.waypoint = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True,
+                                                      lane_type=(carla.LaneType.Driving))
                 current_waypoint = self.waypoint
                 self.route_waypoints.append(current_waypoint)
                 for x in range(self.total_distance):
@@ -121,19 +141,27 @@ class CarlaEnvironment():
                     self.route_waypoints.append(next_waypoint)
                     current_waypoint = next_waypoint
             else:
+                # 从检查点继续
                 # Teleport vehicle to last checkpoint
                 waypoint = self.route_waypoints[self.checkpoint_waypoint_index % len(self.route_waypoints)]
                 transform = waypoint.transform
                 self.vehicle.set_transform(transform)
                 self.current_waypoint_index = self.checkpoint_waypoint_index
 
-            self.navigation_obs = np.array([self.throttle, self.velocity, self.previous_steer, self.distance_from_center, self.angle])
+            # 观测构建与返回
+            # self.navigation_obs = np.array([self.throttle, self.velocity, self.previous_steer, self.distance_from_center, self.angle])
 
             time.sleep(0.5)
             self.collision_history.clear()
 
             self.episode_start_time = time.time()
-            return [self.image_obs, self.navigation_obs]
+            # return [self.image_obs, self.navigation_obs]
+
+            return {
+                'frames': self.image_obs,  # 保持List[List]结构但内部只有单摄像头
+                'command': self.control_obs,  # 控制命令序列
+                'speed': self.speed_obs  # 速度序列
+            }
 
         except:
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
@@ -145,45 +173,50 @@ class CarlaEnvironment():
             if self.display_on:
                 pygame.quit()
 
-# ----------------------------------------------------------------
-# Step method is used for implementing actions taken by our agent|
-# ----------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Step method is used for implementing actions taken by our agent|
+    # ----------------------------------------------------------------
 
     # A step function is used for taking inputs generated by neural net.
     def step(self, action_idx):
         try:
-            self.timesteps+=1
+            # 基础状态更新
+            self.timesteps += 1
             self.fresh_start = False
 
-            # Velocity of the vehicle
+            # 速度计算
             velocity = self.vehicle.get_velocity()
-            self.velocity = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6
-            
+            self.velocity = np.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2) * 3.6
+
             # Action fron action space for contolling the vehicle with a discrete action
+            # 动作执行
+            # 连续动作空间
             if self.continous_action_space:
                 steer = float(action_idx[0])
                 steer = max(min(steer, 1.0), -1.0)
-                throttle = float((action_idx[1] + 1.0)/2)
+                throttle = float((action_idx[1] + 1.0) / 2)
                 throttle = max(min(throttle, 1.0), 0.0)
-                self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer*0.9 + steer*0.1, throttle=self.throttle*0.9 + throttle*0.1))
+                self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer * 0.9 + steer * 0.1,
+                                                                throttle=self.throttle * 0.9 + throttle * 0.1))
                 self.previous_steer = steer
                 self.throttle = throttle
             else:
                 steer = self.action_space[action_idx]
                 if self.velocity < 20.0:
-                    self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer*0.9 + steer*0.1, throttle=1.0))
+                    self.vehicle.apply_control(
+                        carla.VehicleControl(steer=self.previous_steer * 0.9 + steer * 0.1, throttle=1.0))
                 else:
-                    self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer*0.9 + steer*0.1))
+                    self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer * 0.9 + steer * 0.1))
                 self.previous_steer = steer
                 self.throttle = 1.0
-            
-            # Traffic Light state
+
+            # 交通灯处理
             if self.vehicle.is_at_traffic_light():
                 traffic_light = self.vehicle.get_traffic_light()
                 if traffic_light.get_state() == carla.TrafficLightState.Red:
                     traffic_light.set_state(carla.TrafficLightState.Green)
 
-            self.collision_history = self.collision_obj.collision_data            
+            self.collision_history = self.collision_obj.collision_data
 
             # Rotation of the vehicle in correlation to the map/lane
             self.rotation = self.vehicle.get_transform().rotation.yaw
@@ -191,14 +224,15 @@ class CarlaEnvironment():
             # Location of the car
             self.location = self.vehicle.get_location()
 
-            #transform = self.vehicle.get_transform()
-            # Keep track of closest waypoint on the route
+            # transform = self.vehicle.get_transform()
+            # Keep track of closest waypoint on the route,路径点追踪
             waypoint_index = self.current_waypoint_index
             for _ in range(len(self.route_waypoints)):
                 # Check if we passed the next waypoint along the route
                 next_waypoint_index = waypoint_index + 1
                 wp = self.route_waypoints[next_waypoint_index % len(self.route_waypoints)]
-                dot = np.dot(self.vector(wp.transform.get_forward_vector())[:2],self.vector(self.location - wp.transform.location)[:2])
+                dot = np.dot(self.vector(wp.transform.get_forward_vector())[:2],
+                             self.vector(self.location - wp.transform.location)[:2])
                 if dot > 0.0:
                     waypoint_index += 1
                 else:
@@ -206,20 +240,23 @@ class CarlaEnvironment():
 
             self.current_waypoint_index = waypoint_index
             # Calculate deviation from center of the lane
-            self.current_waypoint = self.route_waypoints[ self.current_waypoint_index    % len(self.route_waypoints)]
-            self.next_waypoint = self.route_waypoints[(self.current_waypoint_index+1) % len(self.route_waypoints)]
-            self.distance_from_center = self.distance_to_line(self.vector(self.current_waypoint.transform.location),self.vector(self.next_waypoint.transform.location),self.vector(self.location))
+            self.current_waypoint = self.route_waypoints[self.current_waypoint_index % len(self.route_waypoints)]
+            self.next_waypoint = self.route_waypoints[(self.current_waypoint_index + 1) % len(self.route_waypoints)]
+            self.distance_from_center = self.distance_to_line(self.vector(self.current_waypoint.transform.location),
+                                                              self.vector(self.next_waypoint.transform.location),
+                                                              self.vector(self.location))
             self.center_lane_deviation += self.distance_from_center
 
             # Get angle difference between closest waypoint and vehicle forward vector
-            fwd    = self.vector(self.vehicle.get_velocity())
+            fwd = self.vector(self.vehicle.get_velocity())
             wp_fwd = self.vector(self.current_waypoint.transform.rotation.get_forward_vector())
-            self.angle  = self.angle_diff(fwd, wp_fwd)
+            self.angle = self.angle_diff(fwd, wp_fwd)
 
-             # Update checkpoint for training
+            # Update checkpoint for training
             if not self.fresh_start:
                 if self.checkpoint_frequency is not None:
-                    self.checkpoint_waypoint_index = (self.current_waypoint_index // self.checkpoint_frequency) * self.checkpoint_frequency
+                    self.checkpoint_waypoint_index = (
+                                                                 self.current_waypoint_index // self.checkpoint_frequency) * self.checkpoint_frequency
 
             # Rewards are given below!
             done = False
@@ -246,11 +283,12 @@ class CarlaEnvironment():
             if not done:
                 if self.continous_action_space:
                     if self.velocity < self.min_speed:
-                        reward = (self.velocity / self.min_speed) * centering_factor * angle_factor    
-                    elif self.velocity > self.target_speed:               
-                        reward = (1.0 - (self.velocity-self.target_speed) / (self.max_speed-self.target_speed)) * centering_factor * angle_factor  
-                    else:                                         
-                        reward = 1.0 * centering_factor * angle_factor 
+                        reward = (self.velocity / self.min_speed) * centering_factor * angle_factor
+                    elif self.velocity > self.target_speed:
+                        reward = (1.0 - (self.velocity - self.target_speed) / (
+                                    self.max_speed - self.target_speed)) * centering_factor * angle_factor
+                    else:
+                        reward = 1.0 * centering_factor * angle_factor
                 else:
                     reward = 1.0 * centering_factor * angle_factor
 
@@ -260,35 +298,51 @@ class CarlaEnvironment():
                 done = True
                 self.fresh_start = True
                 if self.checkpoint_frequency is not None:
-                    if self.checkpoint_frequency < self.total_distance//2:
+                    if self.checkpoint_frequency < self.total_distance // 2:
                         self.checkpoint_frequency += 2
                     else:
                         self.checkpoint_frequency = None
                         self.checkpoint_waypoint_index = 0
 
-            while(len(self.camera_obj.front_camera) == 0):
+            # 获取观测数据
+            while (len(self.camera_obj.front_camera) == 0):
                 time.sleep(0.0001)
 
-            self.image_obs = self.camera_obj.front_camera.pop(-1)
-            normalized_velocity = self.velocity/self.target_speed
+            self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 保持List[List]结构
+            # 构建控制命令观测（包含当前实际控制量）
+            self.control_obs = [np.array([
+                self.throttle,
+                self.previous_steer,
+                0.0,  # brake (可根据需要添加)
+                1  # gear (可根据需要添加)
+            ], dtype=np.float32)]
+            # 速度观测
+            self.speed_obs = [np.array([self.velocity], dtype=np.float32)]
+
+            normalized_velocity = self.velocity / self.target_speed
             normalized_distance_from_center = self.distance_from_center / self.max_distance_from_center
             normalized_angle = abs(self.angle / np.deg2rad(20))
-            self.navigation_obs = np.array([self.throttle, self.velocity, normalized_velocity, normalized_distance_from_center, normalized_angle])
-            
-            # Remove everything that has been spawned in the env
+            self.navigation_obs = np.array(
+                [self.throttle, self.velocity, normalized_velocity, normalized_distance_from_center, normalized_angle])
+
+            # Remove everything that has been spawned in the env  # 环境清理
             if done:
                 self.center_lane_deviation = self.center_lane_deviation / self.timesteps
                 self.distance_covered = abs(self.current_waypoint_index - self.checkpoint_waypoint_index)
-                
+
                 for sensor in self.sensor_list:
                     sensor.destroy()
-                
+
                 self.remove_sensors()
-                
+
                 for actor in self.actor_list:
                     actor.destroy()
-            
-            return [self.image_obs, self.navigation_obs], reward, done, [self.distance_covered, self.center_lane_deviation]
+
+            return {
+                'frames': self.image_obs,  # List[List[np.ndarray]] 图像序列
+                'command': self.control_obs,  # List[np.ndarray] 控制命令
+                'speed': self.speed_obs  # List[np.ndarray] 速度
+            }, reward, done, [self.distance_covered, self.center_lane_deviation]
 
         except:
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
@@ -300,9 +354,9 @@ class CarlaEnvironment():
             if self.display_on:
                 pygame.quit()
 
-# -------------------------------------------------
-# Creating and Spawning Pedestrians in our world |
-# -------------------------------------------------
+    # -------------------------------------------------
+    # Creating and Spawning Pedestrians in our world |
+    # -------------------------------------------------
 
     # Walkers are to be included in the simulation yet!
     def create_pedestrians(self):
@@ -344,12 +398,12 @@ class CarlaEnvironment():
             all_actors = self.world.get_actors(self.walker_list)
 
             # set how many pedestrians can cross the road
-            #self.world.set_pedestrians_cross_factor(0.0)
+            # self.world.set_pedestrians_cross_factor(0.0)
             # 3. Starting the motion of our pedestrians
             for i in range(0, len(self.walker_list), 2):
                 # start walker
                 all_actors[i].start()
-            # set walk to random point
+                # set walk to random point
                 all_actors[i].go_to_location(
                     self.world.get_random_location_from_navigation())
 
@@ -357,9 +411,9 @@ class CarlaEnvironment():
             self.client.apply_batch(
                 [carla.command.DestroyActor(x) for x in self.walker_list])
 
-# ---------------------------------------------------
-# Creating and Spawning other vehciles in our world|
-# ---------------------------------------------------
+    # ---------------------------------------------------
+    # Creating and Spawning other vehciles in our world|
+    # ---------------------------------------------------
 
     def set_other_vehicles(self):
         try:
@@ -378,14 +432,13 @@ class CarlaEnvironment():
             self.client.apply_batch(
                 [carla.command.DestroyActor(x) for x in self.actor_list])
 
-# ----------------------------------------------------------------
-# Extra very important methods: their names explain their purpose|
-# ----------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Extra very important methods: their names explain their purpose|
+    # ----------------------------------------------------------------
 
     # Setter for changing the town on the server.
     def change_town(self, new_town):
         self.world = self.client.load_world(new_town)
-
 
     # Getter for fetching the current state of the world that simulator is in.
     def get_world(self) -> object:
@@ -399,13 +452,14 @@ class CarlaEnvironment():
     # Continuous actions are broken into discrete here!
     def angle_diff(self, v0, v1):
         angle = np.arctan2(v1[1], v1[0]) - np.arctan2(v0[1], v0[0])
-        if angle > np.pi: angle -= 2 * np.pi
-        elif angle <= -np.pi: angle += 2 * np.pi
+        if angle > np.pi:
+            angle -= 2 * np.pi
+        elif angle <= -np.pi:
+            angle += 2 * np.pi
         return angle
 
-
     def distance_to_line(self, A, B, p):
-        num   = np.linalg.norm(np.cross(B - A, A - p))
+        num = np.linalg.norm(np.cross(B - A, A - p))
         denom = np.linalg.norm(B - A)
         if np.isclose(denom, 0):
             return np.linalg.norm(p - A)
@@ -420,13 +474,13 @@ class CarlaEnvironment():
     def get_discrete_action_space(self):
         action_space = \
             np.array([
-            -0.50,
-            -0.30,
-            -0.10,
-            0.0,
-            0.10,
-            0.30,
-            0.50
+                -0.50,
+                -0.30,
+                -0.10,
+                0.0,
+                0.10,
+                0.30,
+                0.50
             ])
         return action_space
 
