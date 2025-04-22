@@ -13,12 +13,12 @@ class CIL_multiview(nn.Module):
     def __init__(self, params):
         super(CIL_multiview, self).__init__()
         self.params = params
-
-        resnet_module = importlib.import_module('network.models.building_blocks.resnet_FM')
+        self.projection = nn.Linear(256, 512)  # 将 256 维 -> 512 维
+        resnet_module = importlib.import_module('CILv2.models.building_blocks.resnet_FM')
         resnet_module = getattr(resnet_module, params['encoder_embedding']['perception']['res']['name'])
         self.encoder_embedding_perception = resnet_module(pretrained=g_conf.IMAGENET_PRE_TRAINED,
-                                                          layer_id = params['encoder_embedding']['perception']['res'][ 'layer_id'])
-        _, self.res_out_dim, self.res_out_h, self.res_out_w = self.encoder_embedding_perception.get_backbone_output_shape([g_conf.BATCH_SIZE] + g_conf.IMAGE_SHAPE)[params['encoder_embedding']['perception']['res'][ 'layer_id']]
+                                                          layer_id = params['encoder_embedding']['perception']['res']['layer_id'])
+        _, self.res_out_dim, self.res_out_h, self.res_out_w = self.encoder_embedding_perception.get_backbone_output_shape([g_conf.BATCH_SIZE] + g_conf.IMAGE_SHAPE)[params['encoder_embedding']['perception']['res']['layer_id']]
 
         if params['TxEncoder']['learnable_pe']:
             self.positional_encoding = nn.Parameter(torch.zeros(1, len(g_conf.DATA_USED)*g_conf.ENCODER_INPUT_FRAMES_NUM*self.res_out_h*self.res_out_w, params['TxEncoder']['d_model']))
@@ -50,20 +50,23 @@ class CIL_multiview(nn.Module):
 
     def forward(self, s, s_d, s_s):
         S = int(g_conf.ENCODER_INPUT_FRAMES_NUM)
-        B = s_d[0].shape[0]
+        B = s_d.shape[0]
 
         x = torch.stack([torch.stack(s[i], dim=1) for i in range(S)], dim=1) # [B, S, cam, 3, H, W]
         x = x.view(B*S*len(g_conf.DATA_USED), g_conf.IMAGE_SHAPE[0], g_conf.IMAGE_SHAPE[1], g_conf.IMAGE_SHAPE[2])  # [B*S*cam, 3, H, W]
-        d = s_d[-1]  # [B, 4]
-        s = s_s[-1]  # [B, 1]
-
+        d = s_d[-1].view(B, -1)  # [4] -> [B, 4]
+        s = s_s[-1].view(B, -1)  # [1] -> [B, 1]
+        # print(f"Input d shape: {d.shape}, s shape: {s.shape}")  # 应该是 [B, 4] 和 [B, 1]
         # 图像嵌入
         e_p, _ = self.encoder_embedding_perception(x)    # [B*S*cam, dim, h, w]
+        print(f"ResNet output dim: {self.res_out_dim}, h: {self.res_out_h}, w: {self.res_out_w}")
         encoded_obs = e_p.view(B, S*len(g_conf.DATA_USED), self.res_out_dim, self.res_out_h*self.res_out_w)  # [B, S*cam, dim, h*w]
         encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B, S*cam*h*w, 512]
+        encoded_obs = self.projection(encoded_obs)  # [B, S*cam*h*w, 512]  # 新增投影层
         e_d = self.command(d).unsqueeze(1)     # [B, 1, 512]
         e_s = self.speed(s).unsqueeze(1)       # [B, 1, 512]
-
+        # print(f"Projected encoded_obs shape: {encoded_obs.shape}")  # 应该是 [B, 50, 512]
+        # print(f"e_d shape: {e_d.shape}, e_s shape: {e_s.shape}")  # 应该是 [B, 1, 512]
         encoded_obs = encoded_obs + e_d + e_s
 
         if self.params['TxEncoder']['learnable_pe']:
@@ -78,9 +81,8 @@ class CIL_multiview(nn.Module):
         in_memory = torch.mean(in_memory, dim=1)  # [B, 512]
 
         action_output = self.action_output(in_memory).unsqueeze(1)  # (B, 512) -> (B, 1, len(TARGETS))
-
+        # print(f"action_output shape: {action_output.shape}")  # 调试
         return action_output         # (B, 1, 1), (B, 1, len(TARGETS))
-
 
     def foward_eval(self, s, s_d, s_s):
         S = int(g_conf.ENCODER_INPUT_FRAMES_NUM)

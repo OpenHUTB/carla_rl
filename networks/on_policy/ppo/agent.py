@@ -47,7 +47,7 @@ class PPOAgent:
 
         # 环境参数
         self.town = town
-        self.action_dim = 2  # 转向和油门
+        self.action_dim = 3  # ['steer', 'throttle', 'brake']
 
         # 超参数
         self.clip = POLICY_CLIP
@@ -104,20 +104,36 @@ class PPOAgent:
         assert len(obs_dict['frames']) == g_conf.ENCODER_INPUT_FRAMES_NUM, "帧数不匹配"
 
         with torch.no_grad():
-            # 数据预处理
-            frames = [torch.as_tensor(f, dtype=torch.float32).permute(2, 0, 1).to(device)
-                      for f in obs_dict['frames']]  # [H,W,C] -> [C,H,W]
+            # 数据预处理,将OpenCV格式的(H,W,C)图像转为PyTorch的(C,H,W)格式
+            # 图像数据处理（修复不可写警告）
+            # 标准化图像输入格式
+            frames = []
+            for frame_seq in obs_dict['frames']:  # 处理多帧序列
+                frame_batch = []
+                for img in frame_seq:  # 处理单帧
+                    img = np.ascontiguousarray(img)  # 确保内存连续
+                    if img.shape[-1] == 3:  # HWC格式
+                        img = img.transpose(2, 0, 1)  # 转为CHW
+                    frame_batch.append(torch.from_numpy(img).float().to(device))
+                frames.append(frame_batch)
 
-            command = torch.as_tensor(obs_dict['command'], dtype=torch.float32).unsqueeze(0).to(device)
-            speed = torch.as_tensor([obs_dict['speed']], dtype=torch.float32).unsqueeze(0).to(device)
+            # 命令和速度处理（保持不变）
+            command = torch.as_tensor(obs_dict['command'],
+                                      dtype=torch.float32).to(device)
+            if command.dim() == 1:
+                command = command.unsqueeze(0)
 
-            # 获取动作
-            action, logprob = self.old_policy.get_action_and_log_prob(frames, command, speed)
+            speed = torch.as_tensor(obs_dict['speed'],
+                                    dtype=torch.float32).to(device)
+            speed = speed.unsqueeze(-1) if speed.dim() == 1 else speed
 
+            # 获取动作,动作预测
+            action, logprob = self.old_policy.get_action_and_log_prob(frames, command, speed)   # 返回动作及其对数概率（用于重要性采样）
+        # 经验存储
         if train and not self.memory.is_full():
             self._store_transition(frames, command, speed, action, logprob)
 
-        return action.cpu().numpy().flatten()
+        return action.cpu().numpy().flatten() # 返回动作
 
     def _store_transition(self, frames, command, speed, action, logprob):
         """存储单步转移数据"""

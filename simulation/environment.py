@@ -81,8 +81,9 @@ class CarlaEnvironment():
             # 2. 控制命令（初始化为零）
             self.control_obs = [np.zeros(4, dtype=np.float32)]  # [throttle, steer, brake, gear]
             # 3. 速度
-            current_speed = self.vehicle.get_velocity()
-            self.speed_obs = [np.array([current_speed], dtype=np.float32)]
+            current_velocity = self.vehicle.get_velocity()
+            current_speed = np.linalg.norm([current_velocity.x, current_velocity.y, current_velocity.z])  # 计算标量速度
+            self.speed_obs = [np.array([current_speed], dtype=np.float32)]  # 现在可以正常转换
 
             # 第三人称视角，pygame显示
             if self.display_on:
@@ -159,11 +160,11 @@ class CarlaEnvironment():
 
             return {
                 'frames': self.image_obs,  # 保持List[List]结构但内部只有单摄像头
-                'command': self.control_obs,  # 控制命令序列
-                'speed': self.speed_obs  # 速度序列
+                'command': np.array(self.control_obs, dtype=np.float32),  # 控制命令序列
+                'speed': np.array(self.speed_obs, dtype=np.float32)  # 速度序列
             }
-
         except:
+            print("重置失败")
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.actor_list])
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.walker_list])

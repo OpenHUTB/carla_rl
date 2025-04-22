@@ -5,7 +5,7 @@ import torch.optim as optim
 import numpy as np
 from configs import g_conf
 from torch.distributions import MultivariateNormal
-from CILv2.models.architectures.CIL_multiview import CIL_multiview
+from CILv2.models.architectures.CIL_multiview.CIL_multiview import CIL_multiview
 
 
 class ActorCritic(nn.Module):
@@ -97,6 +97,7 @@ class ActorCritic(nn.Module):
         """
         # 获取动作均值（通过 CIL 的 action_output）
         action_mean = self.cil(s, s_d, s_s).squeeze(1)  # [B, action_dim]
+        print(f"action_mean shape: {action_mean.shape}")  # 调试
         action_mean = torch.tanh(action_mean)  # 限制到 [-1, 1]
 
         # 定义高斯分布,动作分布（带探索噪声）

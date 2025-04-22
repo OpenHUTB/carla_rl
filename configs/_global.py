@@ -26,14 +26,15 @@ _g_conf.BATCH_SIZE = 120
 _g_conf.NUMBER_EPOCH = 100     # 训练迭代总次数
 _g_conf.TRAIN_DATASET_NAME = []
 _g_conf.VALID_DATASET_NAME = []      # 可以评估多个数据集，因此需要列出一个列表
-_g_conf.DATA_USED = ['rgb_left', 'rgb_central', 'rgb_right']
-_g_conf.IMAGE_SHAPE = [3, 88, 200]
+# _g_conf.DATA_USED = ['rgb_left', 'rgb_central', 'rgb_right']
+_g_conf.DATA_USED = ['rgb_central']
+_g_conf.IMAGE_SHAPE = [3, 80, 160]
 # 您要使用的帧步长。
 # 例如，如果您希望有 5 个连续输入图像，每个图像以 20 帧为步长，则应设置 INPUT_FRAMES_NUM =5 和 INPUT_FRAME_INTERVAL=20
 _g_conf.ENCODER_INPUT_FRAMES_NUM = 1
 _g_conf.ENCODER_STEP_INTERVAL = 1
 _g_conf.ENCODER_OUTPUT_STEP_DELAY = 0  # 我们是想预测未来的数据点，还是只预测当前的数据点
-_g_conf.DECODER_OUTPUT_FRAMES_NUM= 1
+_g_conf.DECODER_OUTPUT_FRAMES_NUM = 1
 _g_conf.AUGMENTATION = False
 _g_conf.DATA_FPS = 10
 _g_conf.DATA_COMMAND_CLASS_NUM = 4
