@@ -79,7 +79,7 @@ class CarlaEnvironment():
             self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 获取最新图像, 保持List[List]结构兼容原有接口
             self.sensor_list.append(self.camera_obj.sensor)
             # 2. 控制命令（初始化为零）
-            self.control_obs = [np.zeros(4, dtype=np.float32)]  # [throttle, steer, brake, gear]
+            self.control_obs = [np.zeros(4, dtype=np.float32)]  # [steer, throttle, brake, gear]
             # 3. 速度
             current_velocity = self.vehicle.get_velocity()
             current_speed = np.linalg.norm([current_velocity.x, current_velocity.y, current_velocity.z])  # 计算标量速度
@@ -310,12 +310,14 @@ class CarlaEnvironment():
                 time.sleep(0.0001)
 
             self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 保持List[List]结构
+
+            self.brake = self.vehicle.get_control().brake
             # 构建控制命令观测（包含当前实际控制量）
             self.control_obs = [np.array([
-                self.throttle,
                 self.previous_steer,
-                0.0,  # brake (可根据需要添加)
-                1  # gear (可根据需要添加)
+                self.throttle,
+                self.brake,
+                0
             ], dtype=np.float32)]
             # 速度观测
             self.speed_obs = [np.array([self.velocity], dtype=np.float32)]
