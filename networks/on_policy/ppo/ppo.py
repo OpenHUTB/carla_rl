@@ -11,7 +11,7 @@ from CILv2.models.architectures.CIL_multiview.CIL_multiview import CIL_multiview
 class ActorCritic(nn.Module):
     def __init__(self, cil_params, action_dim, action_std_init):
         super().__init__()
-        self.action_dim = action_dim   # 动作维度（如转向、油门）
+        self.action_dim = action_dim   # ['steer', 'throttle', 'brake']
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # 初始化 CIL_multiview 作为共享特征提取器
@@ -97,17 +97,24 @@ class ActorCritic(nn.Module):
         """
         # 获取动作均值（通过 CIL 的 action_output）
         action_mean = self.cil(s, s_d, s_s).squeeze(1)  # [B, action_dim]
-        print(f"action_mean shape: {action_mean.shape}")  # 调试
-        action_mean = torch.tanh(action_mean)  # 限制到 [-1, 1]
+        # print(f"action_mean shape: {action_mean.shape}")  # 调试
+        # 分维度处理动作范围
+        steering = torch.tanh(action_mean[:, 0])  # 方向盘
+        throttle = torch.tanh(action_mean[:, 1])  # 油门
+        brake = torch.tanh(action_mean[:, 2])  # 刹车
 
-        # 定义高斯分布,动作分布（带探索噪声）
-        cov_mat = torch.diag_embed(self.cov_var.expand_as(action_mean))
+        # 重新组合动作
+        processed_mean = torch.stack([steering, throttle, brake], dim=1)
+
+        # 定义高斯分布,动作分布（带探索噪声）， 通过多元高斯分布增加随机性，实现策略探索
+        cov_mat = torch.diag_embed(self.cov_var.expand_as(processed_mean))
         cov_mat = cov_mat + torch.eye(self.action_dim, device=self.device) * 1e-6
-        dist = MultivariateNormal(action_mean, cov_mat)
+        dist = MultivariateNormal(processed_mean, cov_mat)
 
         # 采样动作
         action = dist.sample()
-        log_prob = dist.log_prob(action)
+        action = torch.clamp(action, -1, 1)  # 全部限制到[-1,1]
+        log_prob = dist.log_prob(action)  # 计算当前动作在策略分布下的对数概率，用于PPO重要性采样,后续训练时会用这个评分判断：当前决策是该奖励还是惩罚
         return action.detach(), log_prob.detach()
 
     def evaluate(self, s, s_d, s_s, action):
