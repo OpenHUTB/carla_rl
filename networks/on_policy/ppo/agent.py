@@ -97,7 +97,10 @@ class PPOAgent:
         self.memory.dones.append(bool(done))
 
     def get_action(self, obs_dict, train=True):
-        """获取动作并存储训练数据"""
+        """
+            连接环境与策略网络的桥梁，同时是数据收集的入口点。
+            获取动作并存储训练数据
+        """
         # 输入验证
         assert isinstance(obs_dict, dict), "输入必须是字典"
         assert 'frames' in obs_dict and 'command' in obs_dict and 'speed' in obs_dict
@@ -133,7 +136,7 @@ class PPOAgent:
         if train and not self.memory.is_full():
             self._store_transition(frames, command, speed, action, logprob)
 
-        return action.cpu().numpy().flatten() # 返回动作
+        return action.cpu().numpy().flatten()  # 返回动作
 
     def _store_transition(self, frames, command, speed, action, logprob):
         """存储单步转移数据"""
@@ -186,9 +189,9 @@ class PPOAgent:
         """准备训练批量数据"""
         # 按时间步重组帧数据
         # 使用列表推导式+并行stack
-        frames = [torch.stack([seq[t] for seq in self.memory.frames])
-                  for t in range(g_conf.ENCODER_INPUT_FRAMES_NUM)]
-
+        # frames = [torch.stack([seq[t] for seq in self.memory.frames[0]])
+        #           for t in range(g_conf.ENCODER_INPUT_FRAMES_NUM)]
+        frames = [torch.stack([seq[0] for seq in self.memory.frames[0]])]  # 提取所有序列的第0帧
         return {
             'frames': frames,
             'commands': torch.cat(self.memory.commands),

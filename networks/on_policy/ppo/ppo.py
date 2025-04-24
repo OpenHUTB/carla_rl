@@ -17,6 +17,8 @@ class ActorCritic(nn.Module):
         # 初始化 CIL_multiview 作为共享特征提取器
         self.cil = CIL_multiview(cil_params).to(self.device)
 
+        self.projection = nn.Linear(256, 512)  # 将 256 维 -> 512 维
+
         # 动态调整的协方差矩阵
         self.cov_var = nn.Parameter(
             torch.full((action_dim,), action_std_init, device=self.device)
@@ -59,23 +61,66 @@ class ActorCritic(nn.Module):
         s_d = self._to_device(s_d)
         s_s = self._to_device(s_s)
         """共享 CIL 的 Transformer 特征提取"""
-        S = int(g_conf.ENCODER_INPUT_FRAMES_NUM)
-        B = s_d.shape[0] if s_d.dim() > 1 else 1
-        if not isinstance(s, (list, tuple)) or len(s) == 0:
-            raise ValueError("输入s必须是包含至少一个元素的序列")
-
+        # 输入统一处理（同时兼容Tensor和numpy输入）
         # 1. 图像序列处理
-        x = torch.stack([torch.stack(s[i], dim=1) for i in range(S)], dim=1)  # [B, S, cam, 3, H, W]
-        x = x.view(B * S * len(g_conf.DATA_USED), *g_conf.IMAGE_SHAPE)  # [B*S*cam, 3, H, W]
+        if isinstance(s, list):
+            if isinstance(s[0], list):
+                # 处理双层列表输入 [[img1, img2,...]]
+                frame_list = []
+                for img in s[0]:
+                    if isinstance(img, np.ndarray):
+                        # numpy数组处理
+                        frame_list.append(torch.from_numpy(img).float().permute(2, 0, 1))
+                    elif isinstance(img, torch.Tensor):
+                        # 已经是张量的情况
+                        if img.dim() == 3 and img.size(0) == 3:  # 已经是CHW格式
+                            frame_list.append(img.float())
+                        else:
+                            frame_list.append(img.float().permute(2, 0, 1))
+                    else:
+                        raise TypeError(f"不支持的图像类型: {type(img)}")
+                s = torch.stack(frame_list, dim=0)  # [N,C,H,W]
+            else:
+                # 处理单层列表输入 [img]
+                img = s[0]
+                if isinstance(img, np.ndarray):
+                    s = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0)  # [1,C,H,W]
+                elif isinstance(img, torch.Tensor):
+                    s = img.float().permute(2, 0, 1).unsqueeze(0) if img.dim() == 3 else img.unsqueeze(0)
+        elif isinstance(s, torch.Tensor):
+            # 已经是张量输入
+            if s.dim() == 3:  # [C,H,W]
+                s = s.unsqueeze(0)  # [1,C,H,W]
+            elif s.dim() == 4:  # [B,C,H,W]
+                pass
+            else:
+                raise ValueError(f"非法张量维度: {s.dim()}")
+        else:
+            raise TypeError(f"不支持的输入类型: {type(s)}")
+
+        # 添加序列和相机维度 (S=1, cam=1)
+        x = s.unsqueeze(1).unsqueeze(1)  # [B,1,1,C,H,W]
+
+        # 获取批量大小
+        B = x.size(0)
+
+        # 重塑图像数据
+        x = x.reshape(B * 1 * 1, *g_conf.IMAGE_SHAPE)  # [B,C,H,W]
+        # 处理速度和命令输入
+        d = s_d[-1].view(B, -1)  # [4] -> [B, 4]
+        s = s_s[-1].view(B, -1)  # [1] -> [B, 1]
 
         # 2. ResNet提取图像特征（相当于人眼视觉处理）
         e_p, _ = self.cil.encoder_embedding_perception(x)  # [B*S*cam, dim, h, w]
-        encoded_obs = e_p.view(B, S * len(g_conf.DATA_USED), self.cil.res_out_dim, -1)
+        encoded_obs = e_p.view(B, 1 * 1, self.cil.res_out_dim, -1)
         encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.cil.res_out_dim)
+        # 投影层（如果存在）
+        if hasattr(self, 'projection'):
+            encoded_obs = self.projection(encoded_obs)
 
         # 3. 融合命令和速度特征（相当于结合驾驶意图）
-        e_d = self.cil.command(s_d[-1]).unsqueeze(1)  # [B, 1, 512]
-        e_s = self.cil.speed(s_s[-1]).unsqueeze(1)  # [B, 1, 512]
+        e_d = self.cil.command(d).unsqueeze(1)  # [B, 1, 512]
+        e_s = self.cil.speed(s).unsqueeze(1)  # [B, 1, 512]
         encoded_obs = encoded_obs + e_d + e_s  # [B, S*cam*h*w, 512]
 
         # 4. 位置编码,Transformer时空建模（相当于大脑综合分析）
