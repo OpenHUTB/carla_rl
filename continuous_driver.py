@@ -162,23 +162,24 @@ def runner():
     if train:
         # 执行训练, total_timesteps：预设的总训练步数。
         while timestep < total_timesteps:
-            print(timestep)
             # 修改两个位置
             # 1. 观测数据修改
             observation = env.reset()  # 重置环境
             # observation = encode.process(observation)  # 编码观测数据（如图像预处理）,对原始观测（如图像）进行标准化/归一化处理。
+
             current_ep_reward = 0
             t1 = datetime.now()  # 记录回合开始时间
             # 回合内交互循环
             for t in range(args.episode_length):
                 # 选择带有策略的动作
                 action = agent.get_action(observation, train=True)  # 通过策略网络选择动作,使用当前策略（带探索噪声）选择动作。
-
+                # print(action)
                 observation, reward, done, info = env.step(action)  # 执行动作并返回新状态、奖励、终止标志和额外信息（如距离、偏离中心程度）。
+
                 if observation is None:  # 无效观测处理
                     break
                 # observation = encode.process(observation)
-                # 存储经验数据, 将(reward, done)存入PPO的回放缓冲区。
+                # 存储经验数据, 将(reward, done)存入PPO的回放缓冲区，用于策略优化。
                 agent.memory.rewards.append(reward)
                 agent.memory.dones.append(done)
                 # 更新统计量
@@ -201,7 +202,6 @@ def runner():
                     episodic_length.append(abs(t3.total_seconds()))  # 记录回合耗时,（用于分析效率）。
                     break
             # 性能指标计算
-
             deviation_from_center += info[1]  # 累计偏离车道中心程度
             distance_covered += info[0]  # 累计行驶距离
 
