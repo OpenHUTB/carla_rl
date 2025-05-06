@@ -91,28 +91,32 @@ class CIL_multiview(nn.Module):
 
         # 获取批量大小
         B = x.size(0)
-
         # 重塑图像数据
         x = x.reshape(B * 1 * 1, *g_conf.IMAGE_SHAPE)  # [B,C,H,W]
 
         # 图像特征提取
-        e_p, _ = self.encoder_embedding_perception(x)  # [B,512,10,20]
-
+        e_p, _ = self.encoder_embedding_perception(x)  # [B,512,10,20]  # [B*S*cam, dim, h, w]
         # 处理速度和命令输入
-        d = s_d[-1].view(B, -1)  # [4] -> [B, 4]
-        s = s_s[-1].view(B, -1)  # [1] -> [B, 1]
-
+        if isinstance(s_d, (list, tuple)):
+            d = s_d[-1]
+        else:
+            d = s_d
+        if isinstance(s_s, (list, tuple)):
+            s = s_s[-1]
+        else:
+            s = s_s
         # 特征重塑
-        encoded_obs = e_p.view(B, 1 * 1, self.res_out_dim, -1)  # [B,1,512,200]
-        encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B,200,512]
-        # 投影层（如果存在）
+        encoded_obs = e_p.view(B, 1 * len(g_conf.DATA_USED), self.res_out_dim,
+                               self.res_out_h * self.res_out_w)  # [B, S*cam, dim, h*w]
+        encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B, S*cam*h*w, 512]
+
+        # 投影层
         if hasattr(self, 'projection'):
             encoded_obs = self.projection(encoded_obs)
 
         # 命令和速度嵌入
         e_d = self.command(d).unsqueeze(1)  # [B,1,512]
         e_s = self.speed(s).unsqueeze(1)  # [B,1,512]
-
         # 特征融合
         encoded_obs = encoded_obs + e_d + e_s
 
@@ -168,7 +172,6 @@ class CIL_multiview(nn.Module):
         action_output = self.action_output(in_memory).unsqueeze(1)  # (B, 512) -> (B, 1, len(TARGETS))
 
         return action_output, resnet_inter, attn_weights
-
 
     def generate_square_subsequent_mask(self, sz):
         r"""为序列生成一个方形掩码。掩码位置用 float('-inf') 填充。

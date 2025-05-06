@@ -173,23 +173,22 @@ def runner():
             for t in range(args.episode_length):
                 # 选择带有策略的动作
                 action = agent.get_action(observation, train=True)  # 通过策略网络选择动作,使用当前策略（带探索噪声）选择动作。
-                # print(action)
                 observation, reward, done, info = env.step(action)  # 执行动作并返回新状态、奖励、终止标志和额外信息（如距离、偏离中心程度）。
-
                 if observation is None:  # 无效观测处理
                     break
                 # observation = encode.process(observation)
                 # 存储经验数据, 将(reward, done)存入PPO的回放缓冲区，用于策略优化。
                 agent.memory.rewards.append(reward)
                 agent.memory.dones.append(done)
+
                 # 更新统计量
                 timestep += 1
-                current_ep_reward += reward
-                # 动态调整探索噪声
+                current_ep_reward += reward  # 累加当前回合（episode）的所有即时奖励，用于监控单回合表现
+                # 动态调整探索噪声，并应用到代理
                 if timestep % action_std_decay_freq == 0:
                     action_std_init = agent.decay_action_std(action_std_decay_rate, min_action_std)
 
-                if timestep == total_timesteps - 1:
+                if timestep == total_timesteps - 1:  # 在训练结束前的最后一个时间步（total_timesteps - 1）保存模型参数
                     agent.chkpt_save()
 
                 # break; if the episode is over终止条件处理
@@ -197,14 +196,13 @@ def runner():
                     episode += 1
 
                     t2 = datetime.now()
-                    t3 = t2 - t1
+                    t3 = t2 - t1  # 计算回合耗时
 
                     episodic_length.append(abs(t3.total_seconds()))  # 记录回合耗时,（用于分析效率）。
                     break
             # 性能指标计算
             deviation_from_center += info[1]  # 累计偏离车道中心程度
             distance_covered += info[0]  # 累计行驶距离
-
             scores.append(current_ep_reward)  # 存储本轮总奖励
 
             # 计算滑动平均奖励
@@ -216,9 +214,9 @@ def runner():
             print('Episode: {}'.format(episode), ', Timestep: {}'.format(timestep),
                   ', Reward:  {:.2f}'.format(current_ep_reward), ', Average Reward:  {:.2f}'.format(cumulative_score))
 
-            # 定期学习与检查点保存, 每10回合学习一次
+            # 定期学习与检查点保存, 每10回合学习一次，控制策略更新频率
             if episode % 10 == 0:
-                agent.learn()  # 从经验中更新策略
+                agent.learn()  # 从经验回放缓冲区采样并更新策略网络
                 agent.chkpt_save()  # 快速保存检查点
                 chkt_file_nums = len(next(os.walk(f'checkpoints/PPO/{town}'))[2])
                 if chkt_file_nums != 0:
@@ -228,7 +226,7 @@ def runner():
                 data_obj = {'cumulative_score': cumulative_score, 'episode': episode, 'timestep': timestep,
                             'action_std_init': action_std_init}
                 with open(chkpt_file, 'wb') as handle:
-                    pickle.dump(data_obj, handle)
+                    pickle.dump(data_obj, handle)  # 序列化保存
 
             # 每5回合记录TensorBoard日志
             if episode % 5 == 0:

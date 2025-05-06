@@ -107,8 +107,21 @@ class ActorCritic(nn.Module):
         # 重塑图像数据
         x = x.reshape(B * 1 * 1, *g_conf.IMAGE_SHAPE)  # [B,C,H,W]
         # 处理速度和命令输入
-        d = s_d[-1].view(B, -1)  # [4] -> [B, 4]
-        s = s_s[-1].view(B, -1)  # [1] -> [B, 1]
+        d = s_d[-1]
+        if d.dim() == 1:  # 如果是 [4]
+            d = d.unsqueeze(0).expand(B, -1)  # -> [1,4] -> [B,4]
+        elif d.dim() == 2:  # 如果是 [B,4]
+            assert d.size(0) == B, f"命令batch不匹配: {d.size(0)} vs {B}"
+        else:
+            raise ValueError(f"非法命令维度: {d.shape}")
+
+        s = s_s[-1]
+        if s.dim() == 1:  # 如果是 [4]
+            s = s.unsqueeze(0).expand(B, -1)  # -> [1,4] -> [B,4]
+        elif s.dim() == 2:  # 如果是 [B,4]
+            assert s.size(0) == B, f"命令batch不匹配: {s.size(0)} vs {B}"
+        else:
+            raise ValueError(f"非法命令维度: {s.shape}")
 
         # 2. ResNet提取图像特征（相当于人眼视觉处理）
         e_p, _ = self.cil.encoder_embedding_perception(x)  # [B*S*cam, dim, h, w]
@@ -156,11 +169,12 @@ class ActorCritic(nn.Module):
         cov_mat = cov_mat + torch.eye(self.action_dim, device=self.device) * 1e-6
         dist = MultivariateNormal(processed_mean, cov_mat)
 
-        # 采样动作
-        action = dist.sample()
-        action = torch.clamp(action, -1, 1)  # 全部限制到[-1,1]
+        # 采样动作（保留梯度）
+        with torch.no_grad():  # 只在采样时阻断梯度
+            action = dist.sample()
+            action = torch.clamp(action, -1, 1)  # 全部限制到[-1,1]
         log_prob = dist.log_prob(action)  # 计算当前动作在策略分布下的对数概率，用于PPO重要性采样,后续训练时会用这个评分判断：当前决策是该奖励还是惩罚
-        return action.detach(), log_prob.detach()
+        return action, log_prob
 
     def evaluate(self, s, s_d, s_s, action):
         """
@@ -169,16 +183,20 @@ class ActorCritic(nn.Module):
           """
         self.cil.eval()
         try:
-            with torch.no_grad():
-                action_mean = self.cil(s, s_d, s_s).squeeze(1)
-                action_mean = torch.tanh(action_mean)
+            # 确保s_d[-1]有正确的batch维度
+            if isinstance(s_d, (list, tuple)) and s_d[-1].dim() == 1:
+                s_d = list(s_d)
+                s_d[-1] = s_d[-1].unsqueeze(0).expand(s.size(0), -1)  # [4]->[B,4]
 
-                cov_mat = torch.diag_embed(self.cov_var.expand_as(action_mean))
-                dist = MultivariateNormal(action_mean, cov_mat)
+            action_mean = self.cil(s, s_d, s_s).squeeze(1)
+            action_mean = torch.tanh(action_mean)
 
-                logprobs = dist.log_prob(action)
-                entropy = dist.entropy()
-                values = self.get_value(s, s_d, s_s)
+            cov_mat = torch.diag_embed(self.cov_var.expand_as(action_mean))
+            dist = MultivariateNormal(action_mean, cov_mat)
+
+            logprobs = dist.log_prob(action)
+            entropy = dist.entropy()
+            values = self.get_value(s, s_d, s_s)
             return logprobs, values, entropy
         finally:
             self.cil.train()

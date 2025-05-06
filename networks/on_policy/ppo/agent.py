@@ -98,75 +98,104 @@ class PPOAgent:
 
     def get_action(self, obs_dict, train=True):
         """
-            连接环境与策略网络的桥梁，同时是数据收集的入口点。
-            获取动作并存储训练数据
+        处理单摄像头的单帧图像输入
         """
         # 输入验证
-        assert isinstance(obs_dict, dict), "输入必须是字典"
-        assert 'frames' in obs_dict and 'command' in obs_dict and 'speed' in obs_dict
-        assert len(obs_dict['frames']) == g_conf.ENCODER_INPUT_FRAMES_NUM, "帧数不匹配"
+        assert len(obs_dict['frames']) == 1, "只支持单摄像头输入"
+        assert len(obs_dict['frames'][0]) == 1, "只支持单帧图像"
 
         with torch.no_grad():
-            # 数据预处理,将OpenCV格式的(H,W,C)图像转为PyTorch的(C,H,W)格式
-            # 图像数据处理（修复不可写警告）
-            # 标准化图像输入格式
-            frames = []
-            for frame_seq in obs_dict['frames']:  # 处理多帧序列
-                frame_batch = []
-                for img in frame_seq:  # 处理单帧
-                    img = np.ascontiguousarray(img)  # 确保内存连续
-                    if img.shape[-1] == 3:  # HWC格式
-                        img = img.transpose(2, 0, 1)  # 转为CHW
-                    frame_batch.append(torch.from_numpy(img).float().to(device))
-                frames.append(frame_batch)
+            # 提取唯一的单帧图像
+            img = obs_dict['frames'][0][0]  # 获取单帧 (H,W,C)
 
-            # 命令和速度处理（保持不变）
-            command = torch.as_tensor(obs_dict['command'],
-                                      dtype=torch.float32).to(device)
-            if command.dim() == 1:
-                command = command.unsqueeze(0)
+            # 转换为PyTorch张量
+            img = np.ascontiguousarray(img)  # 确保内存连续
+            if img.shape[-1] == 3:  # HWC格式
+                img = img.transpose(2, 0, 1)  # 转为CHW (C,H,W)
+            frame_tensor = torch.from_numpy(img).float().to(device)  # 最终形状 (C,H,W)
 
-            speed = torch.as_tensor(obs_dict['speed'],
-                                    dtype=torch.float32).to(device)
-            speed = speed.unsqueeze(-1) if speed.dim() == 1 else speed
+            # 处理其他数据（command/speed等）
+            command = torch.as_tensor(obs_dict['command'], dtype=torch.float32).to(device)
+            speed = torch.as_tensor(obs_dict['speed'], dtype=torch.float32).to(device)
 
-            # 获取动作,动作预测
-            action, logprob = self.old_policy.get_action_and_log_prob(frames, command, speed)   # 返回动作及其对数概率（用于重要性采样）
-        # 经验存储
+            # 获取动作
+            action, logprob = self.old_policy.get_action_and_log_prob(
+                [frame_tensor],  # 注意：保持输入为列表形式以兼容网络接口
+                command.unsqueeze(0) if command.dim() == 1 else command,
+                speed.unsqueeze(-1) if speed.dim() == 1 else speed
+            )
+
+        # 存储经验（如果需要）
         if train and not self.memory.is_full():
-            self._store_transition(frames, command, speed, action, logprob)
+            self._store_transition(frame_tensor, command, speed, action, logprob)
 
-        return action.cpu().numpy().flatten()  # 返回动作
+        return action.cpu().numpy().flatten()
 
     def _store_transition(self, frames, command, speed, action, logprob):
         """存储单步转移数据"""
         assert command.shape[-1] == 4, f"命令维度错误，应为4，得到{command.shape[-1]}"
         self.memory.frames.append(frames)
+        if command.dim() == 1:
+            command = command.unsqueeze(0)  # [4] -> [1, 4]
+        if speed.dim() == 1:
+            speed = speed.unsqueeze(-1)  # [1] -> [1,1]
+        elif speed.dim() == 0:
+            speed = speed.unsqueeze(0).unsqueeze(-1)  # 标量 -> [1,1]
+
         self.memory.commands.append(command)
         self.memory.speeds.append(speed)
         self.memory.actions.append(action)
         self.memory.log_probs.append(logprob)
 
     def learn(self):
+        # 计算优势估计，返回的蒙特卡洛估计
         """执行PPO学习更新"""
         if len(self.memory) < self.batch_size:
             return
 
         # 1. 计算折扣奖励
-        rewards = self._compute_discounted_rewards()
+        rewards = self._compute_discounted_rewards().detach()
 
-        # 2. 准备批量数据
-        batch = self._prepare_batch()
+        # 2. 用于从经验回放缓冲区（memory）中提取数据并进行预处理
+        # batch = self._prepare_batch()
+        # 修改数据准备部分，显式启用梯度
+        old_f = torch.stack(self.memory.frames, dim=0).to(device).requires_grad_(True)
+        old_commands = torch.cat(self.memory.commands, dim=0).to(device).requires_grad_(True)
+        old_speeds = torch.cat(self.memory.speeds, dim=0).to(device).requires_grad_(True)
+        old_actions = torch.stack(self.memory.actions, dim=0).to(device).requires_grad_(True)
 
-        # 3. PPO优化
+        # 只有old_logprobs不需要梯度（因为是旧策略产生的）
+        old_logprobs = torch.stack(self.memory.log_probs, dim=0).to(device).detach()
+
+        # 确保模型在训练模式
+        self.policy.train()
+        # 3. PPO优化,  # 对K个时期epoch优化策略
         for _ in range(self.n_updates_per_iteration):
-            loss = self._compute_ppo_loss(batch, rewards)
 
-            self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
-            self.optimizer.step()
-
+            # loss = self._compute_ppo_loss(old_f, old_commands, old_speeds, old_actions)
+            # 估计旧的动作和值
+            logprobs, values, dist_entropy = self.policy.evaluate(old_f, old_commands, old_speeds, old_actions)
+            print(f"网络输出梯度: logprobs={logprobs.requires_grad}, values={values.requires_grad}")
+            # 以奖励张量匹配值张量的维度
+            values = torch.squeeze(values)
+            # 找到比例 (pi_theta / pi_theta__old)
+            ratios = torch.exp(logprobs - old_logprobs)
+            # 找到代理损失 Surrogate Loss
+            advantages = rewards - values.detach()
+            print(f"中间变量梯度: ratios={ratios.requires_grad}, advantages={advantages.requires_grad}")
+            surr1 = ratios * advantages
+            surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * advantages
+            # final loss of clipped objective PPO
+            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(values, rewards) - 0.01 * dist_entropy
+            print(f"最终loss梯度: {loss.requires_grad}")
+            try:
+                self.optimizer.zero_grad()
+                loss.mean().backward()
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
+                self.optimizer.step()
+            except RuntimeError as e:
+                print(f"梯度更新异常: {e}")
+                torch.cuda.empty_cache()  # 清理GPU缓存
         # 4. 更新旧策略
         self.old_policy.load_state_dict(self.policy.state_dict())
         self.memory.clear()
@@ -191,7 +220,8 @@ class PPOAgent:
         # 使用列表推导式+并行stack
         # frames = [torch.stack([seq[t] for seq in self.memory.frames[0]])
         #           for t in range(g_conf.ENCODER_INPUT_FRAMES_NUM)]
-        frames = [torch.stack([seq[0] for seq in self.memory.frames[0]])]  # 提取所有序列的第0帧
+        # 从单个相机的帧序列中提取第一帧，并将其转换为PyTorch张量，最后放入一个列表中。
+        frames = [torch.stack([seq[0] for seq in self.memory.frames[0]])]
         return {
             'frames': frames,
             'commands': torch.cat(self.memory.commands),
@@ -200,30 +230,30 @@ class PPOAgent:
             'old_logprobs': torch.cat(self.memory.log_probs)
         }
 
-    def _compute_ppo_loss(self, batch, rewards):
-        """计算PPO损失"""
-        # 评估当前策略
-        logprobs, values, entropy = self.policy.evaluate(
-            batch['frames'],
-            batch['commands'],
-            batch['speeds'],
-            batch['old_actions']
-        )
-
-        # 维度处理
-        values = values.view(-1)
-        advantages = rewards - values.detach()
-        ratios = torch.exp(logprobs - batch['old_logprobs'].detach())
-
-        # 计算PPO损失
-        surr1 = ratios * advantages
-        surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * advantages
-
-        policy_loss = -torch.min(surr1, surr2).mean()
-        value_loss = 0.5 * self.MseLoss(values, rewards)
-        entropy_bonus = -0.01 * entropy.mean()
-
-        return policy_loss + value_loss + entropy_bonus
+    # def _compute_ppo_loss(self, old_f, old_commands, old_speeds, old_actions):
+    #     """计算PPO损失"""
+    #     # 估计旧的动作和值
+    #     logprobs, values, entropy = self.policy.evaluate(
+    #         batch['frames'],
+    #         batch['commands'],
+    #         batch['speeds'],
+    #         batch['old_actions']
+    #     )
+    #
+    #     # 维度处理
+    #     values = values.view(-1)
+    #     advantages = rewards - values.detach()
+    #     ratios = torch.exp(logprobs - batch['old_logprobs'].detach())
+    #
+    #     # 计算PPO损失
+    #     surr1 = ratios * advantages
+    #     surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * advantages
+    #
+    #     policy_loss = -torch.min(surr1, surr2).mean()
+    #     value_loss = 0.5 * self.MseLoss(values, rewards)
+    #     entropy_bonus = -0.01 * entropy.mean()
+    #
+    #     return policy_loss + value_loss + entropy_bonus
 
     def set_action_std(self, new_action_std):
         """设置新的动作标准差"""
