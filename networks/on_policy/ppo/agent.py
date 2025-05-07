@@ -169,11 +169,10 @@ class PPOAgent:
 
         # 确保模型在训练模式
         self.policy.train()
-        # 3. PPO优化,  # 对K个时期epoch优化策略
+        # 3. PPO优化,  # 对K个时期epoch优化策略，逐步优化策略网络和价值网络
         for _ in range(self.n_updates_per_iteration):
-
             # loss = self._compute_ppo_loss(old_f, old_commands, old_speeds, old_actions)
-            # 估计旧的动作和值
+            # 用当前策略重新评估旧数据
             logprobs, values, dist_entropy = self.policy.evaluate(old_f, old_commands, old_speeds, old_actions)
             print(f"网络输出梯度: logprobs={logprobs.requires_grad}, values={values.requires_grad}")
             # 以奖励张量匹配值张量的维度
@@ -189,9 +188,19 @@ class PPOAgent:
             loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(values, rewards) - 0.01 * dist_entropy
             print(f"最终loss梯度: {loss.requires_grad}")
             try:
+                print("1")
+                # 确保loss是标量
+                if loss.dim() > 0:  # 如果loss是多维张量
+                    loss = loss.mean()  # 取均值转为标量
+                print(f"Loss value: {loss.item()}")  # 先确认loss值是否正常
+                if torch.isnan(loss).any():
+                    raise ValueError("Loss contains NaN values")
                 self.optimizer.zero_grad()
+                print("2")
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
                 loss.mean().backward()
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
+                print("3")
+
                 self.optimizer.step()
             except RuntimeError as e:
                 print(f"梯度更新异常: {e}")
@@ -268,24 +277,72 @@ class PPOAgent:
         self.set_action_std(self.action_std)
         return self.action_std
 
+    # def save(self, path=None, is_checkpoint=False):
+    #     """保存模型状态"""
+    #     if path is None:
+    #         save_dir = os.path.join(PPO_CHECKPOINT_DIR, self.town)
+    #         os.makedirs(save_dir, exist_ok=True)
+    #
+    #         existing = [f for f in os.listdir(save_dir) if f.startswith('ppo_') and f.endswith('.pth')]
+    #         if is_checkpoint and existing:
+    #             # 检查点模式使用最大编号
+    #             self.checkpoint_file_no = max(
+    #                 int(f.split('_')[1].split('.')[0]) for f in existing
+    #             )
+    #         else:
+    #             # 新文件使用当前数量作为编号
+    #             self.checkpoint_file_no = len(existing)
+    #
+    #         path = os.path.join(save_dir, f"ppo_{self.checkpoint_file_no}.pth")
+    #
+    #     torch.save({
+    #         'model_state': self.old_policy.state_dict(),
+    #         'optimizer_state': self.optimizer.state_dict(),
+    #         'action_std': self.action_std,
+    #         'config': {
+    #             'clip': self.clip,
+    #             'gamma': self.gamma,
+    #             'lr': self.lr,
+    #             'town': self.town,
+    #             'n_updates': self.n_updates_per_iteration,
+    #             'batch_size': self.batch_size
+    #         }
+    #     }, path)
     def save(self, path=None, is_checkpoint=False):
-        """保存模型状态"""
+        """保存模型状态（兼容数字和非数字文件名）"""
         if path is None:
             save_dir = os.path.join(PPO_CHECKPOINT_DIR, self.town)
             os.makedirs(save_dir, exist_ok=True)
 
-            existing = [f for f in os.listdir(save_dir) if f.startswith('ppo_') and f.endswith('.pth')]
+            # 获取所有符合条件的文件
+            existing = [f for f in os.listdir(save_dir)
+                        if f.startswith('ppo_') and f.endswith('.pth')]
+
             if is_checkpoint and existing:
-                # 检查点模式使用最大编号
-                self.checkpoint_file_no = max(
-                    int(f.split('_')[1].split('.')[0]) for f in existing
-                )
+                # 只提取纯数字编号的文件
+                numbered_files = []
+                for f in existing:
+                    try:
+                        # 尝试提取数字部分
+                        num = int(f.split('_')[1].split('.')[0])
+                        numbered_files.append((f, num))
+                    except ValueError:
+                        continue  # 跳过非数字编号的文件
+
+                # 如果有数字编号文件，使用最大编号+1
+                if numbered_files:
+                    self.checkpoint_file_no = max(num for _, num in numbered_files) + 1
+                else:
+                    # 没有数字编号文件时，从0开始
+                    self.checkpoint_file_no = 0
             else:
-                # 新文件使用当前数量作为编号
+                # 新文件使用当前文件数量作为编号
                 self.checkpoint_file_no = len(existing)
 
+            # 生成标准化文件名（确保纯数字编号）
             path = os.path.join(save_dir, f"ppo_{self.checkpoint_file_no}.pth")
 
+        # 保存模型状态
         torch.save({
             'model_state': self.old_policy.state_dict(),
             'optimizer_state': self.optimizer.state_dict(),
