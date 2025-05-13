@@ -13,25 +13,34 @@ class ActorCritic(nn.Module):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.action_dim = action_dim   # ['steer', 'throttle', 'brake']
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         # 特征提取主干网
         # 初始化 CIL_multiview 作为共享特征提取器
         self.cil = CIL_multiview(cil_params).to(self.device)
-        self.projection = nn.Linear(256, 512)  # 将 256 维 -> 512 维
+        # 正确初始化最后一个Linear层（不是Tanh）
+        for name, module in self.cil.action_output.named_modules():
+            if isinstance(module, nn.Linear):
+                if name == '6':  # 根据实际结构调整这个索引
+                    nn.init.orthogonal_(module.weight, gain=0.01)
+                    nn.init.constant_(module.bias, 0.0)
 
+        self.projection = nn.Linear(256, 512)  # 将 256 维 -> 512 维
+        self._convert_image = self._create_image_converter()
         # 动态调整的协方差矩阵
         self.cov_var = nn.Parameter(
-            torch.full((action_dim,), action_std_init, device=self.device)
+            torch.full((action_dim,),
+                       min(max(action_std_init, 0.1), 0.5),  # 限制初始标准差范围
+                       device=self.device)
         )
 
-        # Critic 专用价值头（共享 CIL 的 Transformer 特征）--->> 价值网络
-        self.value_head = nn.Linear(cil_params['TxEncoder']['d_model'], 1)
-        # 初始化权重
-        for m in [self.value_head]:
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.constant_(m.bias, 0.1)
+        # Critic 专用价值头
+        self.value_head = nn.Sequential(
+            nn.Linear(512, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1)
+        )
+        nn.init.orthogonal_(self.value_head[-1].weight, gain=1.0)
+        nn.init.constant_(self.value_head[-1].bias, 0.0)
 
     def forward(self):
         raise NotImplementedError
@@ -147,15 +156,50 @@ class ActorCritic(nn.Module):
     #     in_memory, _ = self.cil.tx_encoder(pe)  # [B, S*cam*h*w, 512]
     #
     #     return torch.mean(in_memory, dim=1)  # [B, 512]
+    def _create_image_converter(self):
+        """创建统一的图像转换方法"""
+
+        def convert(img):
+            if isinstance(img, np.ndarray):
+                img = torch.from_numpy(img).float()
+            elif isinstance(img, torch.Tensor):
+                img = img.float()
+            else:
+                raise TypeError(f"不支持的图像类型: {type(img)}")
+
+            # 确保图像是CHW格式
+            if img.dim() == 3 and img.size(0) == 3:  # 已经是CHW
+                return img
+            elif img.dim() == 3:  # HWC转CHW
+                return img.permute(2, 0, 1)
+            else:
+                raise ValueError(f"非法图像维度: {img.dim()}")
+
+        return convert
 
     def _preprocess_input(self, s):
+        """统一输入预处理"""
         if isinstance(s, list):
-            # 简化的列表处理逻辑
-            return torch.stack([self._convert_image(img) for img in s[0]])
+            # 处理列表输入
+            if isinstance(s[0], list):
+                # 双层列表 [[img1, img2,...]]
+                return torch.stack([torch.stack(
+                    [self._convert_image(img) for img in s[0]],
+                    dim=0
+                )])
+            else:
+                # 单层列表 [img]
+                return torch.stack([self._convert_image(s[0])])
         elif isinstance(s, torch.Tensor):
-            return s.unsqueeze(0) if s.dim() == 3 else s
+            # 张量输入
+            if s.dim() == 3:  # [C,H,W]
+                return s.unsqueeze(0)
+            elif s.dim() == 4:  # [B,C,H,W]
+                return s
+            else:
+                raise ValueError(f"非法张量维度: {s.dim()}")
         else:
-            raise TypeError("Invalid input type")
+            raise TypeError(f"不支持的输入类型: {type(s)}")
 
     def _get_shared_features_with_mean(self, s, s_d, s_s):
         """整合特征提取和动作均值计算的完整实现"""
@@ -199,99 +243,108 @@ class ActorCritic(nn.Module):
 
         return in_memory, action_mean
 
-    def get_action_and_log_prob(self, s, s_d, s_s):
-
-        """
-        ---->> 策略网络
-        决策计算阶段
-           Actor：采样动作并计算概率
-        """
-        # 获取动作均值（通过 CIL 的 action_output）
-        action_mean = self.cil(s, s_d, s_s).squeeze(1)  # [B, action_dim]
-        # print(f"action_mean shape: {action_mean.shape}")  # 调试
-        # 分维度处理动作范围
-        steering = torch.tanh(action_mean[:, 0])  # 方向盘
-        throttle = torch.tanh(action_mean[:, 1])  # 油门
-        brake = torch.tanh(action_mean[:, 2])  # 刹车
-
-        # 重新组合动作
-        processed_mean = torch.stack([steering, throttle, brake], dim=1)
-
-        # 定义高斯分布,动作分布（带探索噪声）， 通过多元高斯分布增加随机性，实现策略探索
-        cov_mat = torch.diag_embed(self.cov_var.expand_as(processed_mean))
-        cov_mat = cov_mat + torch.eye(self.action_dim, device=self.device) * 1e-6
-        dist = MultivariateNormal(processed_mean, cov_mat)
-
-        # 采样动作（保留梯度）
-        with torch.no_grad():  # 只在采样时阻断梯度
-            action = dist.sample()
-            action = torch.clamp(action, -1, 1)  # 全部限制到[-1,1]
-        log_prob = dist.log_prob(action)  # 计算当前动作在策略分布下的对数概率，用于PPO重要性采样,后续训练时会用这个评分判断：当前决策是该奖励还是惩罚
-        return action, log_prob
-
-    # def evaluate(self, s, s_d, s_s, action):
+    # def get_action_and_log_prob(self, s, s_d, s_s):
+    #
     #     """
-    #        控制输出阶段
-    #       PPO 训练阶段评估
-    #       """
-    #     self.cil.eval()
-    #     try:
-    #         # 确保s_d[-1]有正确的batch维度
-    #         if isinstance(s_d, (list, tuple)) and s_d[-1].dim() == 1:
-    #             s_d = list(s_d)
-    #             s_d[-1] = s_d[-1].unsqueeze(0).expand(s.size(0), -1)  # [4]->[B,4]
+    #     ---->> 策略网络
+    #     决策计算阶段
+    #        Actor：采样动作并计算概率
+    #     """
+    #     # 获取动作均值（通过 CIL 的 action_output）
+    #     action_mean = self.cil(s, s_d, s_s).squeeze(1)  # [B, action_dim]
+    #     # print(f"action_mean shape: {action_mean.shape}")  # 调试
+    #     # 分维度处理动作范围
+    #     steering = torch.tanh(action_mean[:, 0])  # 方向盘
+    #     throttle = torch.tanh(action_mean[:, 1])  # 油门
+    #     brake = torch.tanh(action_mean[:, 2])  # 刹车
     #
-    #         action_mean = self.cil(s, s_d, s_s).squeeze(1)
-    #         action_mean = torch.tanh(action_mean)
+    #     # 重新组合动作
+    #     processed_mean = torch.stack([steering, throttle, brake], dim=1)
     #
-    #         cov_mat = torch.diag_embed(self.cov_var.expand_as(action_mean))
-    #         dist = MultivariateNormal(action_mean, cov_mat)
+    #     # 定义高斯分布,动作分布（带探索噪声）， 通过多元高斯分布增加随机性，实现策略探索
+    #     cov_mat = torch.diag_embed(self.cov_var.expand_as(processed_mean))
+    #     cov_mat = cov_mat + torch.eye(self.action_dim, device=self.device) * 1e-6
+    #     dist = MultivariateNormal(processed_mean, cov_mat)
     #
-    #         logprobs = dist.log_prob(action)
-    #         entropy = dist.entropy()
-    #         values = self.get_value(s, s_d, s_s)
-    #         return logprobs, values, entropy
-    #     finally:
-    #         self.cil.train()
-    #         torch.cuda.empty_cache()  # 如果是GPU环境
+    #     # 采样动作（保留梯度）
+    #     with torch.no_grad():  # 只在采样时阻断梯度
+    #         action = dist.sample()
+    #         action = torch.clamp(action, -1, 1)  # 全部限制到[-1,1]
+    #     log_prob = dist.log_prob(action)  # 计算当前动作在策略分布下的对数概率，用于PPO重要性采样,后续训练时会用这个评分判断：当前决策是该奖励还是惩罚
+    #     return action, log_prob
+    def get_action_and_log_prob(self, s, s_d, s_s):
+        # 修改1：强制FP32计算
+        with torch.cuda.amp.autocast(enabled=False):
+            in_memory, action_mean = self._get_shared_features_with_mean(s, s_d, s_s)
+            action_mean = torch.tanh(action_mean) * 1.5  # 扩大输出范围
+
+        # 修改2：更稳定的协方差矩阵
+        action_std = torch.clamp(self.cov_var, min=0.05, max=0.3)  # 限制标准差
+        cov_mat = torch.diag_embed(action_std) + 1e-4 * torch.eye(self.action_dim, device=self.device)
+
+        # 修改3：使用更稳定的分布
+        dist = MultivariateNormal(action_mean.float(), cov_mat.float())
+
+        with torch.no_grad():
+            action = dist.sample().clamp(-1, 1)
+
+        return action, dist.log_prob(action.float())  # 确保FP32
 
     def evaluate(self, s, s_d, s_s, action):
         """
-           评估动作概率和状态价值
+        评估动作概率和状态价值（安全版本）
         """
-        self.cil.eval()       # 将网络切换到评估模式（关闭dropout等）
+        self.cil.eval()  # 将网络切换到评估模式
 
-        # 确保输入在正确设备上
-        s = s.to(self.device)
-        action = action.to(self.device)
-
-        # 处理命令输入
-        if isinstance(s_d, (list, tuple)):
-            s_d = [x.to(self.device) if torch.is_tensor(x) else x for x in s_d]
-            if torch.is_tensor(s_d[-1]) and s_d[-1].dim() == 1:
-                s_d[-1] = s_d[-1].unsqueeze(0).expand(s.size(0), -1)
-        else:
-            s_d = s_d.to(self.device)
-
+        # 1. 输入数据强制标准化处理
         with torch.no_grad():
-            # 禁用自动混合精度，改为手动控制
-            with torch.cuda.amp.autocast(enabled=False):
-                # action_mean = self.cil(s, s_d, s_s).squeeze(1)
-                in_memory, action_mean = self._get_shared_features_with_mean(s, s_d, s_s)
-                # 确保所有张量都是FP32
-                cov_var = self.cov_var.to(torch.float32)
-                eye_matrix = torch.eye(
-                    self.action_dim,
-                    device=self.device,
-                    dtype=torch.float32  # 明确指定dtype
-                ) * 1e-6
+            # 确保所有输入在相同设备且为float32
+            s = s.to(self.device).float()
+            action = action.to(self.device).float()
 
-                cov_mat = torch.diag_embed(cov_var.expand_as(action_mean)) + eye_matrix
-                dist = MultivariateNormal(action_mean, cov_mat)
+            # 处理命令输入
+            if isinstance(s_d, (list, tuple)):
+                s_d = [x.to(self.device).float() if torch.is_tensor(x) else torch.tensor(x, device=self.device).float()
+                       for x in s_d]
+                if s_d[-1].dim() == 1:
+                    s_d[-1] = s_d[-1].unsqueeze(0).expand(s.size(0), -1)
+            else:
+                s_d = s_d.to(self.device).float()
 
+        # 2. 安全获取特征和均值
+        with torch.no_grad():
+            in_memory, action_mean = self._get_shared_features_with_mean(s, s_d, s_s)
+
+            # 3. 安全构建分布（关键修改）
+            cov_var = self.cov_var.expand_as(action_mean)
+            cov_var = torch.clamp(cov_var, min=0.01, max=1.0)  # 更严格的截断
+
+            # 双重保证协方差矩阵正定性
+            eye_matrix = torch.eye(action_mean.size(-1), device=self.device) * 1e-4
+            cov_mat = torch.diag_embed(cov_var) + eye_matrix
+
+            # 4. 安全创建分布（强制CPU计算+无梯度）
+            try:
+                # 先尝试GPU计算
+                dist = MultivariateNormal(
+                    action_mean,
+                    cov_mat,
+                    validate_args=False
+                )
                 logprobs = dist.log_prob(action)
                 entropy = dist.entropy()
-        # 单独计算需要梯度的值函数
+            except RuntimeError:
+                # GPU失败时回退到CPU
+                dist = MultivariateNormal(
+                    action_mean.cpu(),
+                    cov_mat.cpu(),
+                    validate_args=False
+                )
+                logprobs = dist.log_prob(action.cpu()).to(self.device)
+                entropy = dist.entropy().to(self.device)
+
+        # 5. 单独计算值函数（保持梯度）
         with torch.enable_grad():
-            values = self.value_head(in_memory)
+            values = self.value_head(in_memory.detach())  # 阻断特征提取梯度
+
         return logprobs, values, entropy

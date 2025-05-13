@@ -174,32 +174,72 @@ class PPOAgent:
             # loss = self._compute_ppo_loss(old_f, old_commands, old_speeds, old_actions)
             # 用当前策略重新评估旧数据
             logprobs, values, dist_entropy = self.policy.evaluate(old_f, old_commands, old_speeds, old_actions)
-            print(f"网络输出梯度: logprobs={logprobs.requires_grad}, values={values.requires_grad}")
+            # print(f"网络输出梯度: logprobs={logprobs.requires_grad}, values={values.requires_grad}")
+            # 在learn()方法中添加调试输出
+            # print(f"梯度范数 - policy: {torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf'))}")
+
             # 以奖励张量匹配值张量的维度
             values = torch.squeeze(values)
             # 找到比例 (pi_theta / pi_theta__old)
-            ratios = torch.exp(logprobs - old_logprobs)
+            # ratios = torch.exp(logprobs - old_logprobs)
+            ratios = torch.exp(logprobs - old_logprobs).clamp(0.3, 3.0)  # 强制限制比率范围
             # 找到代理损失 Surrogate Loss
             advantages = rewards - values.detach()
-            print(f"中间变量梯度: ratios={ratios.requires_grad}, advantages={advantages.requires_grad}")
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6)
+            advantages = advantages.clamp(-4.0, 4.0)
+            # print(f"中间变量梯度: ratios={ratios.requires_grad}, advantages={advantages.requires_grad}")
             surr1 = ratios * advantages
             surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * advantages
             # final loss of clipped objective PPO
-            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(values, rewards) - 0.01 * dist_entropy
-            print(f"最终loss梯度: {loss.requires_grad}")
+            # loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(values, rewards) - 0.01 * dist_entropy
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            # value_loss = self.MseLoss(values, rewards)
+            # # 价值函数clip部分
+            # value_pred_clipped = values + (values - values.detach()).clamp(-0.2, 0.2)
+            # value_loss_clipped = self.MseLoss(value_pred_clipped, rewards)
+            # value_loss = 0.3 * torch.max(value_loss, value_loss_clipped)
+            # entropy_loss = -0.05 * dist_entropy.mean()  # 提高探索
+
+            value_pred_clipped = values + (values - values.detach()).clamp(-0.2, 0.2)
+            value_loss = 0.5 * torch.max(
+                (values - rewards).pow(2),
+                (value_pred_clipped - rewards).pow(2)
+            ).mean()
+
+            entropy_bonus = 0.1 * dist_entropy.mean()  # 动态探索激励
+            loss = policy_loss + value_loss + entropy_bonus
+            # print(f"最终loss梯度: {loss.requires_grad}")
+
+            #############################################
+            # >>> 在这里插入梯度监控代码 <<<
+            #############################################
+            print(f"""
+                 Avg Logprob: {logprobs.mean().item():.4f} 
+                 | Value: {values.mean().item():.2f}
+                 | Entropy: {dist_entropy.mean().item():.4f}
+                 | Ratios: {ratios.min().item():.2f}~{ratios.max().item():.2f}
+             """)
+
+            # 检查梯度是否传播到actor
+            for name, param in self.policy.named_parameters():
+                if param.grad is not None and 'actor' in name:
+                    print(f"Actor grad - {name}: {param.grad.abs().mean().item():.6f}")
+            #############################################
+
             try:
-                print("1")
+                # print("1")
                 # 确保loss是标量
                 if loss.dim() > 0:  # 如果loss是多维张量
                     loss = loss.mean()  # 取均值转为标量
-                print(f"Loss value: {loss.item()}")  # 先确认loss值是否正常
+                # print(f"Loss value: {loss.item()}")  # 先确认loss值是否正常
                 if torch.isnan(loss).any():
                     raise ValueError("Loss contains NaN values")
                 self.optimizer.zero_grad()
-                print("2")
-                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 1.0)
+                # print("2")
+                torch.nn.utils.clip_grad_norm_(self.policy.parameters(), 0.5)
                 loss.mean().backward()
-                print("3")
+                # print("3")
 
                 self.optimizer.step()
             except RuntimeError as e:

@@ -36,16 +36,46 @@ class CIL_multiview(nn.Module):
         self.tx_encoder = TransformerEncoder(tx_encoder_layer, num_layers=params['TxEncoder']['num_layers'],
                                              norm=nn.LayerNorm(params['TxEncoder']['d_model']))
 
-        self.action_output = FC(params={'neurons': [join_dim] +
-                                            params['action_output']['fc']['neurons'] +
-                                            [len(g_conf.TARGETS)],
-                                 'dropouts': params['action_output']['fc']['dropouts'] + [0.0],
-                                 'end_layer': True})
+        # self.action_output = FC(params={'neurons': [join_dim] +
+        #                                     params['action_output']['fc']['neurons'] +
+        #                                     [len(g_conf.TARGETS)],
+        #                          'dropouts': params['action_output']['fc']['dropouts'] + [0.0],
+        #                          'end_layer': True})
+        # self.action_output = nn.Sequential(
+        #     FC(params={
+        #         'neurons': [join_dim, 256, 128],
+        #         'dropouts': [0.1, 0.1],
+        #         'end_layer': False
+        #     }),
+        #     nn.Tanh(),  # 限制输出范围
+        #     nn.Linear(128, len(g_conf.TARGETS)),
+        #     nn.Tanh()  # 最终输出限制在[-1,1]
+        # )
+        self.action_output = nn.Sequential(
+            nn.Linear(params['TxEncoder']['d_model'], 512),
+            nn.LayerNorm(512),
+            nn.GELU(),  # 比Tanh更适合深度网络
 
-        for m in self.modules():
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+
+            nn.Linear(256, len(g_conf.TARGETS)),
+            nn.Tanh()  # 最终输出限制在[-1,1]
+        )
+
+        # 更安全的初始化方法
+        def init_weights(m):
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                nn.init.constant_(m.bias, 0.1)
+                # 获取当前Linear层在Sequential中的位置
+                if m is list(self.action_output.children())[-2]:  # 倒数第二层是最后一个Linear
+                    nn.init.uniform_(m.weight, -0.003, 0.003)
+                else:
+                    nn.init.orthogonal_(m.weight, gain=1.0)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0.0)
+
+        self.action_output.apply(init_weights)
 
         self.train()
 
