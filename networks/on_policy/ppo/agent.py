@@ -7,7 +7,7 @@ from configs import g_conf
 from torch.distributions import MultivariateNormal
 from networks.on_policy.ppo.ppo import ActorCritic
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 
 class Buffer:
@@ -157,7 +157,6 @@ class PPOAgent:
         rewards = self._compute_discounted_rewards().detach()
 
         # 2. 用于从经验回放缓冲区（memory）中提取数据并进行预处理
-        # batch = self._prepare_batch()
         # 修改数据准备部分，显式启用梯度
         old_f = torch.stack(self.memory.frames, dim=0).to(device).requires_grad_(True)
         old_commands = torch.cat(self.memory.commands, dim=0).to(device).requires_grad_(True)
@@ -171,7 +170,6 @@ class PPOAgent:
         self.policy.train()
         # 3. PPO优化,  # 对K个时期epoch优化策略，逐步优化策略网络和价值网络
         for _ in range(self.n_updates_per_iteration):
-            # loss = self._compute_ppo_loss(old_f, old_commands, old_speeds, old_actions)
             # 用当前策略重新评估旧数据
             logprobs, values, dist_entropy = self.policy.evaluate(old_f, old_commands, old_speeds, old_actions)
             # print(f"网络输出梯度: logprobs={logprobs.requires_grad}, values={values.requires_grad}")
@@ -279,31 +277,6 @@ class PPOAgent:
             'old_logprobs': torch.cat(self.memory.log_probs)
         }
 
-    # def _compute_ppo_loss(self, old_f, old_commands, old_speeds, old_actions):
-    #     """计算PPO损失"""
-    #     # 估计旧的动作和值
-    #     logprobs, values, entropy = self.policy.evaluate(
-    #         batch['frames'],
-    #         batch['commands'],
-    #         batch['speeds'],
-    #         batch['old_actions']
-    #     )
-    #
-    #     # 维度处理
-    #     values = values.view(-1)
-    #     advantages = rewards - values.detach()
-    #     ratios = torch.exp(logprobs - batch['old_logprobs'].detach())
-    #
-    #     # 计算PPO损失
-    #     surr1 = ratios * advantages
-    #     surr2 = torch.clamp(ratios, 1 - self.clip, 1 + self.clip) * advantages
-    #
-    #     policy_loss = -torch.min(surr1, surr2).mean()
-    #     value_loss = 0.5 * self.MseLoss(values, rewards)
-    #     entropy_bonus = -0.01 * entropy.mean()
-    #
-    #     return policy_loss + value_loss + entropy_bonus
-
     def set_action_std(self, new_action_std):
         """设置新的动作标准差"""
         assert new_action_std > 0, f"动作标准差必须大于0，得到{new_action_std}"
@@ -317,37 +290,6 @@ class PPOAgent:
         self.set_action_std(self.action_std)
         return self.action_std
 
-    # def save(self, path=None, is_checkpoint=False):
-    #     """保存模型状态"""
-    #     if path is None:
-    #         save_dir = os.path.join(PPO_CHECKPOINT_DIR, self.town)
-    #         os.makedirs(save_dir, exist_ok=True)
-    #
-    #         existing = [f for f in os.listdir(save_dir) if f.startswith('ppo_') and f.endswith('.pth')]
-    #         if is_checkpoint and existing:
-    #             # 检查点模式使用最大编号
-    #             self.checkpoint_file_no = max(
-    #                 int(f.split('_')[1].split('.')[0]) for f in existing
-    #             )
-    #         else:
-    #             # 新文件使用当前数量作为编号
-    #             self.checkpoint_file_no = len(existing)
-    #
-    #         path = os.path.join(save_dir, f"ppo_{self.checkpoint_file_no}.pth")
-    #
-    #     torch.save({
-    #         'model_state': self.old_policy.state_dict(),
-    #         'optimizer_state': self.optimizer.state_dict(),
-    #         'action_std': self.action_std,
-    #         'config': {
-    #             'clip': self.clip,
-    #             'gamma': self.gamma,
-    #             'lr': self.lr,
-    #             'town': self.town,
-    #             'n_updates': self.n_updates_per_iteration,
-    #             'batch_size': self.batch_size
-    #         }
-    #     }, path)
     def save(self, path=None, is_checkpoint=False):
         """保存模型状态（兼容数字和非数字文件名）"""
         if path is None:
