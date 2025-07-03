@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import importlib
-import numpy as np
-
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 from configs import g_conf
 from CILv2.models.building_blocks import FC
 from CILv2.models.building_blocks.PositionalEncoding import PositionalEncoding
@@ -14,12 +14,12 @@ class CIL_multiview(nn.Module):
     def __init__(self, params):
         super(CIL_multiview, self).__init__()
         self.params = params
-        self.projection = nn.Linear(256, 512)  # 将 256 维 -> 512 维
+        self.device = torch.device("cpu")
         resnet_module = importlib.import_module('CILv2.models.building_blocks.resnet_FM')
         resnet_module = getattr(resnet_module, params['encoder_embedding']['perception']['res']['name'])
         self.encoder_embedding_perception = resnet_module(pretrained=g_conf.IMAGENET_PRE_TRAINED,
-                                                          layer_id = params['encoder_embedding']['perception']['res']['layer_id'])
-        _, self.res_out_dim, self.res_out_h, self.res_out_w = self.encoder_embedding_perception.get_backbone_output_shape([g_conf.BATCH_SIZE] + g_conf.IMAGE_SHAPE)[params['encoder_embedding']['perception']['res']['layer_id']]
+                                                          layer_id = params['encoder_embedding']['perception']['res'][ 'layer_id'])
+        _, self.res_out_dim, self.res_out_h, self.res_out_w = self.encoder_embedding_perception.get_backbone_output_shape([g_conf.BATCH_SIZE] + g_conf.IMAGE_SHAPE)[params['encoder_embedding']['perception']['res'][ 'layer_id']]
 
         if params['TxEncoder']['learnable_pe']:
             self.positional_encoding = nn.Parameter(torch.zeros(1, len(g_conf.DATA_USED)*g_conf.ENCODER_INPUT_FRAMES_NUM*self.res_out_h*self.res_out_w, params['TxEncoder']['d_model']))
@@ -36,150 +36,79 @@ class CIL_multiview(nn.Module):
         self.tx_encoder = TransformerEncoder(tx_encoder_layer, num_layers=params['TxEncoder']['num_layers'],
                                              norm=nn.LayerNorm(params['TxEncoder']['d_model']))
 
-        # self.action_output = FC(params={'neurons': [join_dim] +
-        #                                     params['action_output']['fc']['neurons'] +
-        #                                     [len(g_conf.TARGETS)],
-        #                          'dropouts': params['action_output']['fc']['dropouts'] + [0.0],
-        #                          'end_layer': True})
-        # self.action_output = nn.Sequential(
-        #     FC(params={
-        #         'neurons': [join_dim, 256, 128],
-        #         'dropouts': [0.1, 0.1],
-        #         'end_layer': False
-        #     }),
-        #     nn.Tanh(),  # 限制输出范围
-        #     nn.Linear(128, len(g_conf.TARGETS)),
-        #     nn.Tanh()  # 最终输出限制在[-1,1]
-        # )
-        self.action_output = nn.Sequential(
-            nn.Linear(params['TxEncoder']['d_model'], 512),
-            nn.LayerNorm(512),
-            nn.GELU(),  # 比Tanh更适合深度网络
+        self.action_output = FC(params={'neurons': [join_dim] +
+                                            params['action_output']['fc']['neurons'] +
+                                            [len(g_conf.TARGETS)],
+                                 'dropouts': params['action_output']['fc']['dropouts'] + [0.0],
+                                 'end_layer': True})
 
-            nn.Linear(512, 256),
-            nn.LayerNorm(256),
-            nn.GELU(),
-
-            nn.Linear(256, len(g_conf.TARGETS)),
-            nn.Tanh()  # 最终输出限制在[-1,1]
-        )
-
-        # 更安全的初始化方法
-        def init_weights(m):
+        for m in self.modules():
             if isinstance(m, nn.Linear):
-                # 获取当前Linear层在Sequential中的位置
-                if m is list(self.action_output.children())[-2]:  # 倒数第二层是最后一个Linear
-                    nn.init.uniform_(m.weight, -0.003, 0.003)
-                else:
-                    nn.init.orthogonal_(m.weight, gain=1.0)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0.0)
-
-        self.action_output.apply(init_weights)
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0.1)
 
         self.train()
 
-    def forward(self, s, s_d, s_s):
-        # 输入统一处理（同时兼容Tensor和numpy输入）
-        if isinstance(s, list):
-            if isinstance(s[0], list):
-                # 处理双层列表输入 [[img1, img2,...]]
-                frame_list = []
-                for img in s[0]:
-                    if isinstance(img, np.ndarray):
-                        # numpy数组处理
-                        frame_list.append(torch.from_numpy(img).float().permute(2, 0, 1))
-                    elif isinstance(img, torch.Tensor):
-                        # 已经是张量的情况
-                        if img.dim() == 3 and img.size(0) == 3:  # 已经是CHW格式
-                            frame_list.append(img.float())
-                        else:
-                            frame_list.append(img.float().permute(2, 0, 1))
-                    else:
-                        raise TypeError(f"不支持的图像类型: {type(img)}")
-                s = torch.stack(frame_list, dim=0)  # [N,C,H,W]
-            else:
-                # 处理单层列表输入 [img]
-                img = s[0]
-                if isinstance(img, np.ndarray):
-                    s = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0)  # [1,C,H,W]
-                elif isinstance(img, torch.Tensor):
-                    s = img.float().permute(2, 0, 1).unsqueeze(0) if img.dim() == 3 else img.unsqueeze(0)
-        elif isinstance(s, torch.Tensor):
-            # 已经是张量输入
-            if s.dim() == 3:  # [C,H,W]
-                s = s.unsqueeze(0)  # [1,C,H,W]
-            elif s.dim() == 4:  # [B,C,H,W]
-                pass
-            else:
-                raise ValueError(f"非法张量维度: {s.dim()}")
-        else:
-            raise TypeError(f"不支持的输入类型: {type(s)}")
+    def forward(self, s, s_d, s_s, B):
+        # 所有 tensor 均假定已经有 batch 维度，不再添加 unsqueeze
+        S = int(g_conf.ENCODER_INPUT_FRAMES_NUM)
+        # B = s_s[0].shape[0]  # 应该是 1
 
-        # 添加序列和相机维度 (S=1, cam=1)
-        x = s.unsqueeze(1).unsqueeze(1)  # [B,1,1,C,H,W]
-
-        # 获取批量大小
-        B = x.size(0)
-        # 重塑图像数据
-        x = x.reshape(B * 1 * 1, *g_conf.IMAGE_SHAPE)  # [B,C,H,W]
-
-        # 图像特征提取
-        e_p, _ = self.encoder_embedding_perception(x)  # [B,512,10,20]  # [B*S*cam, dim, h, w]
-        # 处理速度和命令输入
-        if isinstance(s_d, (list, tuple)):
-            d = s_d[-1]
-        else:
-            d = s_d
-        if isinstance(s_s, (list, tuple)):
-            s = s_s[-1]
-        else:
-            s = s_s
-        # 特征重塑
-        encoded_obs = e_p.view(B, 1 * len(g_conf.DATA_USED), self.res_out_dim,
-                               self.res_out_h * self.res_out_w)  # [B, S*cam, dim, h*w]
+        # ========== 图像堆叠 [B, S, cam, 3, H, W] ==========
+        x = torch.stack([torch.stack(s[i], dim=1) for i in range(S)], dim=1)  # [B, S, cam, 3, H, W]
+        # print("→ stacked x shape:", x.shape)
+        x = x.view(B*S*len(g_conf.DATA_USED), g_conf.IMAGE_SHAPE[0], g_conf.IMAGE_SHAPE[1], g_conf.IMAGE_SHAPE[2])  # [B*S*cam, 3, H, W]
+        d = s_d[-1]  # [B, 4]
+        s = s_s[-1]  # [B, 1]
+        # print("final x shape:", x.shape)  # 应为 [1*S*cam, 3, H, W]
+        # print("final d shape:", d.shape)  # [1, 4]
+        # print("final s shape:", s.shape)  # [1, 1]
+        # 图像嵌入
+        # torch.save(x, "x_crash.pt")
+        e_p, _ = self.encoder_embedding_perception(x)    # [B*S*cam, dim, h, w]
+        encoded_obs = e_p.view(B, S*len(g_conf.DATA_USED), self.res_out_dim, self.res_out_h*self.res_out_w)  # [B, S*cam, dim, h*w]
         encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B, S*cam*h*w, 512]
+        e_d = self.command(d).unsqueeze(1)     # [B, 1, 512]
+        e_s = self.speed(s).unsqueeze(1)       # [B, 1, 512]
 
-        # 投影层
-        if hasattr(self, 'projection'):
-            encoded_obs = self.projection(encoded_obs)
-
-        # 命令和速度嵌入
-        e_d = self.command(d).unsqueeze(1)  # [B,1,512]
-        e_s = self.speed(s).unsqueeze(1)  # [B,1,512]
-        # 特征融合
         encoded_obs = encoded_obs + e_d + e_s
 
-        # 位置编码
-        if hasattr(self, 'positional_encoding'):
-            if self.params['TxEncoder']['learnable_pe']:
-                pe = encoded_obs + self.positional_encoding
-            else:
-                pe = self.positional_encoding(encoded_obs)
+        if self.params['TxEncoder']['learnable_pe']:
+            # 位置编码 positional encoding
+            pe = encoded_obs + self.positional_encoding    # [B, S*cam*h*w, 512]
         else:
-            pe = encoded_obs
+            pe = self.positional_encoding(encoded_obs)
 
-        # Transformer编码
-        if hasattr(self, 'tx_encoder'):
-            in_memory, _ = self.tx_encoder(pe)  # [B,200,512]
-            in_memory = torch.mean(in_memory, dim=1)  # [B,512]
-        else:
-            in_memory = torch.mean(encoded_obs, dim=1)  # [B,512]
+        # Transformer 编码器多头自注意力层
+        in_memory, _ = self.tx_encoder(pe)  # [B, S*cam*h*w, 512]
 
-        # 动作输出
-        action_output = self.action_output(in_memory)  # [B,action_dim]
+        in_memory = torch.mean(in_memory, dim=1)  # [B, 512]
 
-        return action_output.unsqueeze(1)  # [B,1,action_dim]
+        action_output = self.action_output(in_memory).unsqueeze(1)  # (B, 512) -> (B, 1, len(TARGETS))
+
+        return action_output         # (B, 1, 1), (B, 1, len(TARGETS))
 
     def foward_eval(self, s, s_d, s_s):
+
+        # s = [[img.to(self.device) for img in frame] for frame in s]  # [S][cam][B, 3, H, W]
+        # s_d = [x.to(self.device) for x in s_d]  # 每个都是 [B, dim]
+        # s_s = [x.to(self.device) for x in s_s]  # 每个都是 [B, 1]
         S = int(g_conf.ENCODER_INPUT_FRAMES_NUM)
         B = s_d[0].shape[0]
 
         x = torch.stack([torch.stack(s[i], dim=1) for i in range(S)], dim=1)  # [B, S, cam, 3, H, W]
-        x = x.view(B * S * len(g_conf.DATA_USED), g_conf.IMAGE_SHAPE[0], g_conf.IMAGE_SHAPE[1], g_conf.IMAGE_SHAPE[2])  # [B*S*cam, 3, H, W]
+        x = x.view(B * S * len(g_conf.DATA_USED), *g_conf.IMAGE_SHAPE)  # [B*S*cam, 3, H, W]
         d = s_d[-1]  # [B, 4]
         s = s_s[-1]  # [B, 1]
+        # batch_size = 164
+        # features = []
+        # with torch.no_grad():  # 前向提取特征，不需要梯度
+        #     for i in range(0, B, batch_size):
+        #         x_batch = x[i:i + batch_size]
+        #         e_p_batch, _ = self.encoder_embedding_perception(x_batch)  # shape [bs, dim, h, w]
+        #         features.append(e_p_batch)
 
+        # e_p = torch.cat(features, dim=0)  # [B*S*cam, dim, h, w]
         # 图像嵌入
         e_p, resnet_inter = self.encoder_embedding_perception(x)  # [B*S*cam, dim, h, w]
         encoded_obs = e_p.view(B, S * len(g_conf.DATA_USED), self.res_out_dim,  self.res_out_h * self.res_out_w)  # [B, S*cam, dim, h*w]
@@ -201,7 +130,7 @@ class CIL_multiview(nn.Module):
 
         action_output = self.action_output(in_memory).unsqueeze(1)  # (B, 512) -> (B, 1, len(TARGETS))
 
-        return action_output, resnet_inter, attn_weights
+        return action_output, in_memory, attn_weights
 
     def generate_square_subsequent_mask(self, sz):
         r"""为序列生成一个方形掩码。掩码位置用 float('-inf') 填充。
