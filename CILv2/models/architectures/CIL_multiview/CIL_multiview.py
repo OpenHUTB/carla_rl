@@ -65,7 +65,18 @@ class CIL_multiview(nn.Module):
         # print("final s shape:", s.shape)  # [1, 1]
         # 图像嵌入
         # torch.save(x, "x_crash.pt")
-        e_p, _ = self.encoder_embedding_perception(x)    # [B*S*cam, dim, h, w]
+        # e_p, _ = self.encoder_embedding_perception(x)    # [B*S*cam, dim, h, w]
+        features = []
+        with torch.no_grad():  # 如果是 inference 模式
+            for i in range(0, x.shape[0], 1):  # 每次处理一个样本（你也可以改成 batch_size=4、8 试试）
+                x_batch = x[i:i + 1]
+                e_p_batch, _ = self.encoder_embedding_perception(x_batch)  # [1, dim, h, w]
+                features.append(e_p_batch)
+
+        e_p = torch.cat(features, dim=0)  # [B*S*cam, dim, h, w]
+        if B > 1:
+            print('1')
+
         encoded_obs = e_p.view(B, S*len(g_conf.DATA_USED), self.res_out_dim, self.res_out_h*self.res_out_w)  # [B, S*cam, dim, h*w]
         encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B, S*cam*h*w, 512]
         e_d = self.command(d).unsqueeze(1)     # [B, 1, 512]
@@ -88,7 +99,7 @@ class CIL_multiview(nn.Module):
 
         return action_output         # (B, 1, 1), (B, 1, len(TARGETS))
 
-    def foward_eval(self, s, s_d, s_s):
+    def forward_eval(self, s, s_d, s_s):
 
         # s = [[img.to(self.device) for img in frame] for frame in s]  # [S][cam][B, 3, H, W]
         # s_d = [x.to(self.device) for x in s_d]  # 每个都是 [B, dim]
@@ -110,7 +121,15 @@ class CIL_multiview(nn.Module):
 
         # e_p = torch.cat(features, dim=0)  # [B*S*cam, dim, h, w]
         # 图像嵌入
-        e_p, resnet_inter = self.encoder_embedding_perception(x)  # [B*S*cam, dim, h, w]
+        # e_p, resnet_inter = self.encoder_embedding_perception(x)  # [B*S*cam, dim, h, w]
+        features = []
+        with torch.no_grad():  # 如果是 inference 模式
+            for i in range(0, x.shape[0], 1):  # 每次处理一个样本
+                x_batch = x[i:i + 1]
+                e_p_batch, _ = self.encoder_embedding_perception(x_batch)  # [1, dim, h, w]
+                features.append(e_p_batch)
+
+        e_p = torch.cat(features, dim=0)  # [B*S*cam, dim, h, w]
         encoded_obs = e_p.view(B, S * len(g_conf.DATA_USED), self.res_out_dim,  self.res_out_h * self.res_out_w)  # [B, S*cam, dim, h*w]
         encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B, S*cam*h*w, 512]
         e_d = self.command(d).unsqueeze(1)  # [B, 1, 512]

@@ -13,7 +13,7 @@ from simulation.settings import RGB_CAMERA, SSC_CAMERA
 class CameraSensor():
 
     def __init__(self, vehicle):
-        self.sensor_name = SSC_CAMERA
+        self.sensor_name = RGB_CAMERA
         self.parent = vehicle
         self.front_camera = list()
         world = self.parent.get_world()
@@ -87,12 +87,13 @@ class CameraSensorEnv:
         pygame.display.flip()
 
 
+
 # ---------------------------------------------------------------------|
 # ------------------------------- COLLISION SENSOR|
 # ---------------------------------------------------------------------|
 
-# 这很重要，因为它能帮助我们追踪碰撞
-# 它还有助于在检测到任何碰撞后重置车辆
+# It's an important as it helps us to tract collisions
+# It also helps with resetting the vehicle after detecting any collisions
 class CollisionSensor:
 
     def __init__(self, vehicle) -> None:
@@ -105,7 +106,7 @@ class CollisionSensor:
         self.sensor.listen(
             lambda event: CollisionSensor._on_collision(weak_self, event))
 
-    # 碰撞传感器用于检测驾驶过程中发生的碰撞。
+    # Collision sensor to detect collisions occured in the driving process.
     def _set_collision_sensor(self, world) -> object:
         collision_sensor_bp = world.get_blueprint_library().find(self.sensor_name)
         sensor_relative_transform = carla.Transform(
@@ -114,9 +115,6 @@ class CollisionSensor:
             collision_sensor_bp, sensor_relative_transform, attach_to=self.parent)
         return collision_sensor
 
-    # @staticmethod 声明一个静态方法，不可以有 cls 参数（用于指代类本身的约定性名称）或者 self 参数。
-    # （cls 代表的是类本身，而self 代表的是一个特定的实例）
-    # 不可以访问类属性、实例属性
     @staticmethod
     def _on_collision(weak_self, event):
         self = weak_self()

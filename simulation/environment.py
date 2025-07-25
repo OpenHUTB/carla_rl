@@ -42,7 +42,6 @@ class CarlaEnvironment():
         self.walker_list = list()
         self.create_pedestrians()
 
-    # A reset function for reseting our environment.
     def reset(self):
 
         try:
@@ -54,7 +53,6 @@ class CarlaEnvironment():
                 self.actor_list.clear()
             self.remove_sensors()
 
-            # Blueprint of our main vehicle
             vehicle_bp = self.get_vehicle(CAR_NAME)
 
             if self.town == "Town07":
@@ -72,7 +70,7 @@ class CarlaEnvironment():
 
             # Camera Sensor
             self.camera_obj = CameraSensor(self.vehicle)
-            while (len(self.camera_obj.front_camera) == 0):
+            while len(self.camera_obj.front_camera) == 0:
                 time.sleep(0.0001)
 
             # self.image_obs = self.camera_obj.front_camera.pop(-1)
@@ -134,8 +132,13 @@ class CarlaEnvironment():
 
                 self.frame_buffer = []
                 for _ in range(g_conf.ENCODER_INPUT_FRAMES_NUM):
-                    while len(self.camera_obj.front_camera) == 0:
+                    max_wait = 100  # 最多等 100 次（100ms）
+                    waited = 0
+                    while len(self.camera_obj.front_camera) == 0 and waited < max_wait:
                         time.sleep(0.001)
+                        waited += 1
+                    if len(self.camera_obj.front_camera) == 0:
+                        raise RuntimeError("摄像头图像数据未获取成功，front_camera 为空")
                     raw_img = self.camera_obj.front_camera.pop(-1)
                     cam_views = []
                     for cam in g_conf.DATA_USED:
@@ -336,9 +339,13 @@ class CarlaEnvironment():
                         self.checkpoint_frequency = None
                         self.checkpoint_waypoint_index = 0
 
-            while (len(self.camera_obj.front_camera) == 0):
+            max_wait1 = 100
+            waited1 = 0
+            while len(self.camera_obj.front_camera) == 0 and waited1 < max_wait1:
                 time.sleep(0.0001)
-
+                waited1 += 1
+            if len(self.camera_obj.front_camera) == 0:
+                raise RuntimeError("摄像头图像数据未获取成功，front_camera 为空")
             self.image_obs = self.camera_obj.front_camera.pop(-1)
             normalized_velocity = self.velocity / self.target_speed
             normalized_distance_from_center = self.distance_from_center / self.max_distance_from_center
@@ -346,8 +353,13 @@ class CarlaEnvironment():
             self.navigation_obs = np.array(
                 [self.throttle, self.velocity, normalized_velocity, normalized_distance_from_center, normalized_angle])
 
-            while len(self.camera_obj.front_camera) == 0:
+            max_wait2 = 100
+            waited2 = 0
+            while len(self.camera_obj.front_camera) == 0 and waited2 < max_wait2:
                 time.sleep(0.0001)
+                waited2 += 1
+            if len(self.camera_obj.front_camera) == 0:
+                raise RuntimeError("摄像头图像数据未获取成功，front_camera 为空")
             raw_img = self.camera_obj.front_camera.pop(-1)
             cam_views = []
             for cam in g_conf.DATA_USED:
