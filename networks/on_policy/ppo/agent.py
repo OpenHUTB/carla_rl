@@ -170,12 +170,13 @@ class PPOAgent:
         self.policy.train()
         # 3. PPO优化,  # 对K个时期epoch优化策略，逐步优化策略网络和价值网络
         for _ in range(self.n_updates_per_iteration):
+            print("1")
             # 用当前策略重新评估旧数据
             logprobs, values, dist_entropy = self.policy.evaluate(old_f, old_commands, old_speeds, old_actions)
             # print(f"网络输出梯度: logprobs={logprobs.requires_grad}, values={values.requires_grad}")
             # 在learn()方法中添加调试输出
             # print(f"梯度范数 - policy: {torch.nn.utils.clip_grad_norm_(self.policy.parameters(), float('inf'))}")
-
+            print("2")
             # 以奖励张量匹配值张量的维度
             values = torch.squeeze(values)
             # 找到比例 (pi_theta / pi_theta__old)
@@ -191,7 +192,7 @@ class PPOAgent:
             # final loss of clipped objective PPO
             # loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(values, rewards) - 0.01 * dist_entropy
             policy_loss = -torch.min(surr1, surr2).mean()
-
+            print("3")
             # value_loss = self.MseLoss(values, rewards)
             # # 价值函数clip部分
             # value_pred_clipped = values + (values - values.detach()).clamp(-0.2, 0.2)
@@ -204,11 +205,11 @@ class PPOAgent:
                 (values - rewards).pow(2),
                 (value_pred_clipped - rewards).pow(2)
             ).mean()
-
+            print("4")
             entropy_bonus = 0.1 * dist_entropy.mean()  # 动态探索激励
             loss = policy_loss + value_loss + entropy_bonus
             # print(f"最终loss梯度: {loss.requires_grad}")
-
+            print("5")
             #############################################
             # >>> 在这里插入梯度监控代码 <<<
             #############################################

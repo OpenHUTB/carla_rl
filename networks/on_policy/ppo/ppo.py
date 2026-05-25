@@ -187,7 +187,6 @@ class ActorCritic(nn.Module):
                 s_d[-1] = s_d[-1].unsqueeze(0).expand(s.size(0), -1)
         else:
             s_d = s_d.to(self.device)
-
         with torch.no_grad():
             # 禁用自动混合精度，改为手动控制
             with torch.cuda.amp.autocast(enabled=False):
