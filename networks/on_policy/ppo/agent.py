@@ -103,7 +103,6 @@ class PPOAgent:
         # 输入验证
         assert len(obs_dict['frames']) == 1, "只支持单摄像头输入"
         assert len(obs_dict['frames'][0]) == 1, "只支持单帧图像"
-
         with torch.no_grad():
             # 提取唯一的单帧图像
             img = obs_dict['frames'][0][0]  # 获取单帧 (H,W,C)
@@ -379,3 +378,4 @@ class PPOAgent:
         self.set_action_std(self.action_std)
         self.n_updates_per_iteration = config.get('n_updates', 7)
         self.batch_size = config.get('batch_size', 64)
+

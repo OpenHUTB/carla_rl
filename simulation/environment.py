@@ -5,11 +5,15 @@ import pygame
 from simulation.connection import carla
 from simulation.sensors import CameraSensor, CameraSensorEnv, CollisionSensor
 from simulation.settings import *
+from configs import g_conf
+import torch
 
 
 class CarlaEnvironment():
 
     def __init__(self, client, world, town, checkpoint_frequency=100, continuous_action=True) -> None:
+
+        self.device = torch.device("cpu")
         self.client = client
         self.world = world
         self.blueprint_library = self.world.get_blueprint_library()
@@ -37,23 +41,25 @@ class CarlaEnvironment():
         self.actor_list = list()
         self.walker_list = list()
         self.create_pedestrians()
-
         self.image_obs = None
         self.control_obs = None
         self.speed_obs = None
 
     # A reset function for reseting our environment.
+
     def reset(self):
+
         try:
             # 销毁上一回合创建的车辆和传感器
+
             if len(self.actor_list) != 0 or len(self.sensor_list) != 0:
                 self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
                 self.client.apply_batch([carla.command.DestroyActor(x) for x in self.actor_list])
                 self.sensor_list.clear()
                 self.actor_list.clear()
             self.remove_sensors()
-
             # 从蓝图库选择指定车型
+
             vehicle_bp = self.get_vehicle(CAR_NAME)
 
             # 根据地图选择初始位置
@@ -61,7 +67,7 @@ class CarlaEnvironment():
                 transform = self.map.get_spawn_points()[38] #Town7  is 38
                 self.total_distance = 750
             elif self.town == "Town02":
-                transform = self.map.get_spawn_points()[1] #Town2 is 1
+                transform = self.map.get_spawn_points()[1]  # Town2 is 1
                 self.total_distance = 780
             else:
                 # 随机出生点
@@ -73,10 +79,11 @@ class CarlaEnvironment():
 
             # 在车辆放置语义分割相机并监听
             self.camera_obj = CameraSensor(self.vehicle)
-            while(len(self.camera_obj.front_camera) == 0):
+            while len(self.camera_obj.front_camera) == 0:
                 time.sleep(0.0001)
             # 1. 获取单帧图像 [H,W,C]格式
             self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 获取最新图像, 保持List[List]结构兼容原有接口
+
             self.sensor_list.append(self.camera_obj.sensor)
             # 2. 控制命令（初始化为零）
             # self.control_obs = [np.zeros(4, dtype=np.float32)]  # [steer, throttle, brake, gear]
@@ -131,7 +138,8 @@ class CarlaEnvironment():
                 self.current_waypoint_index = 0
                 # Waypoint nearby angle and distance from it
                 self.route_waypoints = list()
-                self.waypoint = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True, lane_type=(carla.LaneType.Driving))
+                self.waypoint = self.map.get_waypoint(self.vehicle.get_location(), project_to_road=True,
+                                                      lane_type=(carla.LaneType.Driving))
                 current_waypoint = self.waypoint
                 self.route_waypoints.append(current_waypoint)
                 for x in range(self.total_distance):
@@ -149,6 +157,28 @@ class CarlaEnvironment():
                         next_waypoint = current_waypoint.next(1.0)[0]
                     self.route_waypoints.append(next_waypoint)
                     current_waypoint = next_waypoint
+                self.next_waypoint = current_waypoint
+                velocity = self.vehicle.get_velocity()
+                self.velocity = np.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2) * 3.6  # km/h
+
+                self.frame_buffer = []
+                for _ in range(g_conf.ENCODER_INPUT_FRAMES_NUM):
+                    max_wait = 100  # 最多等 100 次（100ms）
+                    waited = 0
+                    while len(self.camera_obj.front_camera) == 0 and waited < max_wait:
+                        time.sleep(0.001)
+                        waited += 1
+                    if len(self.camera_obj.front_camera) == 0:
+                        raise RuntimeError("摄像头图像数据未获取成功，front_camera 为空")
+                    raw_img = self.camera_obj.front_camera.pop(-1)
+                    cam_views = []
+                    for cam in g_conf.DATA_USED:
+                        cam_views.append(self._process_image(raw_img))  # 图像 -> tensor
+                    self.frame_buffer.append(cam_views)
+
+                self.command_tensor = self._get_command_tensor()
+                self.speed_tensor = torch.FloatTensor([[self.velocity]])
+
             else:
                 # 从检查点继续
                 # Teleport vehicle to last checkpoint
@@ -182,9 +212,45 @@ class CarlaEnvironment():
             if self.display_on:
                 pygame.quit()
 
-# ----------------------------------------------------------------
-# Step method is used for implementing actions taken by our agent|
-# ----------------------------------------------------------------
+    def _process_image(self, image_np):
+        # image_np: numpy (H, W, 3), uint8
+        image_tensor = torch.from_numpy(image_np.copy()).permute(2, 0, 1).float() / 255.0  # [3, H, W]
+        return image_tensor.to(self.device)
+
+    def _get_command_tensor(self):
+        # 你需要根据当前导航逻辑，选出一个命令类别（如前进/左/右等）
+        current_location = self.vehicle.get_transform().location
+        current_yaw = self.vehicle.get_transform().rotation.yaw  # 当前车头朝向（角度）
+
+        next_waypoint = self.next_waypoint.transform.location
+        vec_to_waypoint = next_waypoint - current_location
+
+        # 目标方向角度
+        target_yaw = np.degrees(np.arctan2(vec_to_waypoint.y, vec_to_waypoint.x))
+
+        # 差值处理（限制在 [-180, 180]）
+        yaw_diff = target_yaw - current_yaw
+        while yaw_diff > 180:
+            yaw_diff -= 360
+        while yaw_diff < -180:
+            yaw_diff += 360
+
+        # 决策规则：根据角度差设置导航指令类别
+        if abs(yaw_diff) < 10:
+            command_index = 0  # 直行
+        elif yaw_diff >= 10:
+            command_index = 2  # 右转
+        elif yaw_diff <= -10:
+            command_index = 1  # 左转
+        else:
+            command_index = 3  # 默认/FOLLOW
+        one_hot = torch.zeros(g_conf.DATA_COMMAND_CLASS_NUM)
+        one_hot[command_index] = 1.0
+        return one_hot.to(self.device)
+
+    # ----------------------------------------------------------------
+    # Step method is used for implementing actions taken by our agent|
+    # ----------------------------------------------------------------
 
     # A step function is used for taking inputs generated by neural net.
     def step(self, action_idx):
@@ -197,23 +263,26 @@ class CarlaEnvironment():
             velocity = self.vehicle.get_velocity()
             self.velocity = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6
 
+
             # Action fron action space for contolling the vehicle with a discrete action
             # 动作执行
             # 连续动作空间
             if self.continous_action_space:
                 steer = float(action_idx[0])
                 steer = max(min(steer, 1.0), -1.0)
-                throttle = float((action_idx[1] + 1.0)/2)
+                throttle = float((action_idx[1] + 1.0) / 2)
                 throttle = max(min(throttle, 1.0), 0.0)
-                self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer*0.9 + steer*0.1, throttle=self.throttle*0.9 + throttle*0.1))
+                self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer * 0.9 + steer * 0.1,
+                                                                throttle=self.throttle * 0.9 + throttle * 0.1))
                 self.previous_steer = steer
                 self.throttle = throttle
             else:
                 steer = self.action_space[action_idx]
                 if self.velocity < 20.0:
-                    self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer*0.9 + steer*0.1, throttle=1.0))
+                    self.vehicle.apply_control(
+                        carla.VehicleControl(steer=self.previous_steer * 0.9 + steer * 0.1, throttle=1.0))
                 else:
-                    self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer*0.9 + steer*0.1))
+                    self.vehicle.apply_control(carla.VehicleControl(steer=self.previous_steer * 0.9 + steer * 0.1))
                 self.previous_steer = steer
                 self.throttle = 1.0
 
@@ -230,7 +299,6 @@ class CarlaEnvironment():
 
             # Location of the car
             self.location = self.vehicle.get_location()
-
             #transform = self.vehicle.get_transform()
             # Keep track of closest waypoint on the route,路径点追踪
             waypoint_index = self.current_waypoint_index
@@ -238,7 +306,8 @@ class CarlaEnvironment():
                 # Check if we passed the next waypoint along the route
                 next_waypoint_index = waypoint_index + 1
                 wp = self.route_waypoints[next_waypoint_index % len(self.route_waypoints)]
-                dot = np.dot(self.vector(wp.transform.get_forward_vector())[:2],self.vector(self.location - wp.transform.location)[:2])
+                dot = np.dot(self.vector(wp.transform.get_forward_vector())[:2],
+                             self.vector(self.location - wp.transform.location)[:2])
                 if dot > 0.0:
                     waypoint_index += 1
                 else:
@@ -246,20 +315,23 @@ class CarlaEnvironment():
 
             self.current_waypoint_index = waypoint_index
             # Calculate deviation from center of the lane
-            self.current_waypoint = self.route_waypoints[ self.current_waypoint_index    % len(self.route_waypoints)]
-            self.next_waypoint = self.route_waypoints[(self.current_waypoint_index+1) % len(self.route_waypoints)]
-            self.distance_from_center = self.distance_to_line(self.vector(self.current_waypoint.transform.location),self.vector(self.next_waypoint.transform.location),self.vector(self.location))
+            self.current_waypoint = self.route_waypoints[self.current_waypoint_index % len(self.route_waypoints)]
+            self.next_waypoint = self.route_waypoints[(self.current_waypoint_index + 1) % len(self.route_waypoints)]
+            self.distance_from_center = self.distance_to_line(self.vector(self.current_waypoint.transform.location),
+                                                              self.vector(self.next_waypoint.transform.location),
+                                                              self.vector(self.location))
             self.center_lane_deviation += self.distance_from_center
 
             # Get angle difference between closest waypoint and vehicle forward vector
-            fwd    = self.vector(self.vehicle.get_velocity())
+            fwd = self.vector(self.vehicle.get_velocity())
             wp_fwd = self.vector(self.current_waypoint.transform.rotation.get_forward_vector())
-            self.angle  = self.angle_diff(fwd, wp_fwd)
+            self.angle = self.angle_diff(fwd, wp_fwd)
 
-             # Update checkpoint for training
+            # Update checkpoint for training
             if not self.fresh_start:
                 if self.checkpoint_frequency is not None:
-                    self.checkpoint_waypoint_index = (self.current_waypoint_index // self.checkpoint_frequency) * self.checkpoint_frequency
+                    self.checkpoint_waypoint_index = (
+                                                                 self.current_waypoint_index // self.checkpoint_frequency) * self.checkpoint_frequency
 
             # Rewards are given below!
             # 根据车辆的状态计算即时奖励(reward)并判断是否结束当前训练回合(episode)
@@ -304,7 +376,7 @@ class CarlaEnvironment():
                 self.fresh_start = True
                 # 动态调整检查点频率
                 if self.checkpoint_frequency is not None:
-                    if self.checkpoint_frequency < self.total_distance//2:
+                    if self.checkpoint_frequency < self.total_distance // 2:
                         self.checkpoint_frequency += 2
                     else:
                         self.checkpoint_frequency = None
@@ -361,13 +433,14 @@ class CarlaEnvironment():
             if self.display_on:
                 pygame.quit()
 
-# -------------------------------------------------
-# Creating and Spawning Pedestrians in our world |
-# -------------------------------------------------
+    # -------------------------------------------------
+    # Creating and Spawning Pedestrians in our world |
+    # -------------------------------------------------
 
     # Walkers are to be included in the simulation yet!
     def create_pedestrians(self):
         try:
+
             # Our code for this method has been broken into 3 sections.
 
             # 1. Getting the available spawn points in  our world.
@@ -405,12 +478,12 @@ class CarlaEnvironment():
             all_actors = self.world.get_actors(self.walker_list)
 
             # set how many pedestrians can cross the road
-            #self.world.set_pedestrians_cross_factor(0.0)
+            # self.world.set_pedestrians_cross_factor(0.0)
             # 3. Starting the motion of our pedestrians
             for i in range(0, len(self.walker_list), 2):
                 # start walker
                 all_actors[i].start()
-            # set walk to random point
+                # set walk to random point
                 all_actors[i].go_to_location(
                     self.world.get_random_location_from_navigation())
 
@@ -418,9 +491,9 @@ class CarlaEnvironment():
             self.client.apply_batch(
                 [carla.command.DestroyActor(x) for x in self.walker_list])
 
-# ---------------------------------------------------
-# Creating and Spawning other vehciles in our world|
-# ---------------------------------------------------
+    # ---------------------------------------------------
+    # Creating and Spawning other vehciles in our world|
+    # ---------------------------------------------------
 
     def set_other_vehicles(self):
         try:
@@ -439,14 +512,13 @@ class CarlaEnvironment():
             self.client.apply_batch(
                 [carla.command.DestroyActor(x) for x in self.actor_list])
 
-# ----------------------------------------------------------------
-# Extra very important methods: their names explain their purpose|
-# ----------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # Extra very important methods: their names explain their purpose|
+    # ----------------------------------------------------------------
 
     # Setter for changing the town on the server.
     def change_town(self, new_town):
         self.world = self.client.load_world(new_town)
-
 
     # Getter for fetching the current state of the world that simulator is in.
     def get_world(self) -> object:
@@ -460,13 +532,14 @@ class CarlaEnvironment():
     # Continuous actions are broken into discrete here!
     def angle_diff(self, v0, v1):
         angle = np.arctan2(v1[1], v1[0]) - np.arctan2(v0[1], v0[0])
-        if angle > np.pi: angle -= 2 * np.pi
-        elif angle <= -np.pi: angle += 2 * np.pi
+        if angle > np.pi:
+            angle -= 2 * np.pi
+        elif angle <= -np.pi:
+            angle += 2 * np.pi
         return angle
 
-
     def distance_to_line(self, A, B, p):
-        num   = np.linalg.norm(np.cross(B - A, A - p))
+        num = np.linalg.norm(np.cross(B - A, A - p))
         denom = np.linalg.norm(B - A)
         if np.isclose(denom, 0):
             return np.linalg.norm(p - A)
@@ -481,13 +554,13 @@ class CarlaEnvironment():
     def get_discrete_action_space(self):
         action_space = \
             np.array([
-            -0.50,
-            -0.30,
-            -0.10,
-            0.0,
-            0.10,
-            0.30,
-            0.50
+                -0.50,
+                -0.30,
+                -0.10,
+                0.0,
+                0.10,
+                0.30,
+                0.50
             ])
         return action_space
 

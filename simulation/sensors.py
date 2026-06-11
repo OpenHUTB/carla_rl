@@ -13,7 +13,7 @@ from simulation.settings import RGB_CAMERA, SSC_CAMERA
 class CameraSensor():
 
     def __init__(self, vehicle):
-        self.sensor_name = SSC_CAMERA
+        self.sensor_name = RGB_CAMERA
         self.parent = vehicle
         self.front_camera = list()
         world = self.parent.get_world()

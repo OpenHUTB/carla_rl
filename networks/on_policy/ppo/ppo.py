@@ -31,7 +31,7 @@ class ActorCritic(nn.Module):
         # Note that I chose 0.2 for stdev arbitrarily.
         self.cov_var = torch.full((self.action_dim,), action_std_init, device=self.device)
         # Create the covariance matrix
-        self.cov_mat = torch.diag(self.cov_var).unsqueeze(dim=0)
+        # self.cov_mat = torch.diag(self.cov_var).unsqueeze(dim=0)
 
         # Critic 专用价值头
         self.value_head = nn.Sequential(
@@ -206,3 +206,4 @@ class ActorCritic(nn.Module):
         with torch.enable_grad():
             values = self.value_head(in_memory)   # 状态价值估计
         return logprobs, values, entropy
+

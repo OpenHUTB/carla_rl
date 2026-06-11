@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import importlib
 import numpy as np
-
 from configs import g_conf
 from CILv2.models.building_blocks import FC
 from CILv2.models.building_blocks.PositionalEncoding import PositionalEncoding
@@ -21,6 +20,7 @@ class CIL_multiview(nn.Module):
                                                           layer_id = params['encoder_embedding']['perception']['res']['layer_id'])
         _, self.res_out_dim, self.res_out_h, self.res_out_w = self.encoder_embedding_perception.get_backbone_output_shape([g_conf.BATCH_SIZE] + g_conf.IMAGE_SHAPE)[params['encoder_embedding']['perception']['res']['layer_id']]
 
+
         if params['TxEncoder']['learnable_pe']:
             self.positional_encoding = nn.Parameter(torch.zeros(1, len(g_conf.DATA_USED)*g_conf.ENCODER_INPUT_FRAMES_NUM*self.res_out_h*self.res_out_w, params['TxEncoder']['d_model']))
         else:
@@ -35,6 +35,7 @@ class CIL_multiview(nn.Module):
                                                    norm_first=params['TxEncoder']['norm_first'], batch_first=True)
         self.tx_encoder = TransformerEncoder(tx_encoder_layer, num_layers=params['TxEncoder']['num_layers'],
                                              norm=nn.LayerNorm(params['TxEncoder']['d_model']))
+
 
         # self.action_output = FC(params={'neurons': [join_dim] +
         #                                     params['action_output']['fc']['neurons'] +
@@ -172,6 +173,7 @@ class CIL_multiview(nn.Module):
         return action_output.unsqueeze(1)  # [B,1,action_dim]
 
     def foward_eval(self, s, s_d, s_s):
+
         S = int(g_conf.ENCODER_INPUT_FRAMES_NUM)
         B = s_d[0].shape[0]
 
@@ -182,6 +184,7 @@ class CIL_multiview(nn.Module):
 
         # 图像嵌入
         e_p, resnet_inter = self.encoder_embedding_perception(x)  # [B*S*cam, dim, h, w]
+
         encoded_obs = e_p.view(B, S * len(g_conf.DATA_USED), self.res_out_dim,  self.res_out_h * self.res_out_w)  # [B, S*cam, dim, h*w]
         encoded_obs = encoded_obs.transpose(2, 3).reshape(B, -1, self.res_out_dim)  # [B, S*cam*h*w, 512]
         e_d = self.command(d).unsqueeze(1)  # [B, 1, 512]
@@ -202,6 +205,7 @@ class CIL_multiview(nn.Module):
         action_output = self.action_output(in_memory).unsqueeze(1)  # (B, 512) -> (B, 1, len(TARGETS))
 
         return action_output, resnet_inter, attn_weights
+
 
     def generate_square_subsequent_mask(self, sz):
         r"""为序列生成一个方形掩码。掩码位置用 float('-inf') 填充。
