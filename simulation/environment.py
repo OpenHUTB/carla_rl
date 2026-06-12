@@ -41,10 +41,16 @@ class CarlaEnvironment():
         self.actor_list = list()
         self.walker_list = list()
         self.create_pedestrians()
+        self.image_obs = None
+        self.control_obs = None
+        self.speed_obs = None
+
+    # A reset function for reseting our environment.
 
     def reset(self):
 
         try:
+            # 销毁上一回合创建的车辆和传感器
 
             if len(self.actor_list) != 0 or len(self.sensor_list) != 0:
                 self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
@@ -52,48 +58,71 @@ class CarlaEnvironment():
                 self.sensor_list.clear()
                 self.actor_list.clear()
             self.remove_sensors()
+            # 从蓝图库选择指定车型
 
             vehicle_bp = self.get_vehicle(CAR_NAME)
 
+            # 根据地图选择初始位置
             if self.town == "Town07":
-                transform = self.map.get_spawn_points()[38]  # Town7  is 38
+                transform = self.map.get_spawn_points()[38] #Town7  is 38
                 self.total_distance = 750
             elif self.town == "Town02":
                 transform = self.map.get_spawn_points()[1]  # Town2 is 1
                 self.total_distance = 780
             else:
+                # 随机出生点
                 transform = random.choice(self.map.get_spawn_points())
                 self.total_distance = 250
-
+            # 生成车辆
             self.vehicle = self.world.try_spawn_actor(vehicle_bp, transform)
             self.actor_list.append(self.vehicle)
 
-            # Camera Sensor
+            # 在车辆放置语义分割相机并监听
             self.camera_obj = CameraSensor(self.vehicle)
             while len(self.camera_obj.front_camera) == 0:
                 time.sleep(0.0001)
+            # 1. 获取单帧图像 [H,W,C]格式
+            self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 获取最新图像, 保持List[List]结构兼容原有接口
 
-            # self.image_obs = self.camera_obj.front_camera.pop(-1)
             self.sensor_list.append(self.camera_obj.sensor)
+            # 2. 控制命令（初始化为零）
+            # self.control_obs = [np.zeros(4, dtype=np.float32)]  # [steer, throttle, brake, gear]
+            control = self.vehicle.get_control()
+            self.control_obs = np.array([
+                control.steer,
+                control.throttle,
+                control.brake,
+                0  # gear
+            ], dtype=np.float32)
 
-            # Third person view of our vehicle in the Simulated env
+            # 3. 速度
+            velocity = self.vehicle.get_velocity()
+            self.velocity = np.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2) * 3.6  # km/h
+            # 观测数据也转为km/h
+            self.speed_obs = [np.array([self.velocity], dtype=np.float32)]
+
+            # 第三人称视角，pygame显示
             if self.display_on:
                 self.env_camera_obj = CameraSensorEnv(self.vehicle)
                 self.sensor_list.append(self.env_camera_obj.sensor)
 
-            # Collision sensor
+            # 碰撞传感器
             self.collision_obj = CollisionSensor(self.vehicle)
             self.collision_history = self.collision_obj.collision_data
             self.sensor_list.append(self.collision_obj.sensor)
 
-            self.timesteps = 0
-            self.rotation = self.vehicle.get_transform().rotation.yaw
-            self.previous_location = self.vehicle.get_location()
+            # 状态变量初始化
+            self.timesteps = 0  # 回合步数计数器
+            self.rotation = self.vehicle.get_transform().rotation.yaw  # 初始偏航角
+            self.previous_location = self.vehicle.get_location()  # 记录初始位置
+            # 度量指标清零
             self.distance_traveled = 0.0
             self.center_lane_deviation = 0.0
-            self.target_speed = 22  # km/h
+            # 速度控制参数
+            self.target_speed = 22 #km/h
             self.max_speed = 25.0
             self.min_speed = 15.0
+            # 车道保持参数
             self.max_distance_from_center = 3
             self.throttle = float(0.0)
             self.previous_steer = float(0.0)
@@ -103,6 +132,8 @@ class CarlaEnvironment():
             self.center_lane_deviation = 0.0
             self.distance_covered = 0.0
 
+            # 路径点生成
+            # 全新回合路径
             if self.fresh_start:
                 self.current_waypoint_index = 0
                 # Waypoint nearby angle and distance from it
@@ -149,22 +180,29 @@ class CarlaEnvironment():
                 self.speed_tensor = torch.FloatTensor([[self.velocity]])
 
             else:
+                # 从检查点继续
                 # Teleport vehicle to last checkpoint
                 waypoint = self.route_waypoints[self.checkpoint_waypoint_index % len(self.route_waypoints)]
                 transform = waypoint.transform
                 self.vehicle.set_transform(transform)
                 self.current_waypoint_index = self.checkpoint_waypoint_index
 
-            self.navigation_obs = np.array(
-                [self.throttle, self.velocity, self.previous_steer, self.distance_from_center, self.angle])
+            # 观测构建与返回
+            # self.navigation_obs = np.array([self.throttle, self.velocity, self.previous_steer, self.distance_from_center, self.angle])
 
             time.sleep(0.5)
             self.collision_history.clear()
 
             self.episode_start_time = time.time()
-            return self.frame_buffer, [self.command_tensor], [self.speed_tensor]
+            # return [self.image_obs, self.navigation_obs]
 
+            return {
+                'frames': self.image_obs,  # 保持List[List]结构但内部只有单摄像头
+                'command': np.array(self.control_obs, dtype=np.float32),  # 控制命令序列
+                'speed': np.array(self.speed_obs, dtype=np.float32)   # 速度序列
+            }
         except:
+            print("重置失败")
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.actor_list])
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.walker_list])
@@ -217,15 +255,18 @@ class CarlaEnvironment():
     # A step function is used for taking inputs generated by neural net.
     def step(self, action_idx):
         try:
-
+            # 基础状态更新
             self.timesteps += 1
             self.fresh_start = False
 
-            # Velocity of the vehicle
+            # 速度计算
             velocity = self.vehicle.get_velocity()
-            self.velocity = np.sqrt(velocity.x ** 2 + velocity.y ** 2 + velocity.z ** 2) * 3.6
+            self.velocity = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2) * 3.6
+
 
             # Action fron action space for contolling the vehicle with a discrete action
+            # 动作执行
+            # 连续动作空间
             if self.continous_action_space:
                 steer = float(action_idx[0])
                 steer = max(min(steer, 1.0), -1.0)
@@ -245,7 +286,7 @@ class CarlaEnvironment():
                 self.previous_steer = steer
                 self.throttle = 1.0
 
-            # Traffic Light state
+            # 交通灯处理
             if self.vehicle.is_at_traffic_light():
                 traffic_light = self.vehicle.get_traffic_light()
                 if traffic_light.get_state() == carla.TrafficLightState.Red:
@@ -258,9 +299,8 @@ class CarlaEnvironment():
 
             # Location of the car
             self.location = self.vehicle.get_location()
-
-            # transform = self.vehicle.get_transform()
-            # Keep track of closest waypoint on the route
+            #transform = self.vehicle.get_transform()
+            # Keep track of closest waypoint on the route,路径点追踪
             waypoint_index = self.current_waypoint_index
             for _ in range(len(self.route_waypoints)):
                 # Check if we passed the next waypoint along the route
@@ -294,44 +334,47 @@ class CarlaEnvironment():
                                                                  self.current_waypoint_index // self.checkpoint_frequency) * self.checkpoint_frequency
 
             # Rewards are given below!
+            # 根据车辆的状态计算即时奖励(reward)并判断是否结束当前训练回合(episode)
             done = False
             reward = 0
+            # 惩罚条件（负奖励+终止）
+            if len(self.collision_history) != 0:  # 发生碰撞
+                done = True
+                reward = -10
+            elif self.distance_from_center > self.max_distance_from_center:  # 偏离车道中心过远
+                done = True
+                reward = -10
+            elif self.episode_start_time + 10 < time.time() and self.velocity < 1.0:   # 10秒内速度过低
+                reward = -10
+                done = True
+            elif self.velocity > self.max_speed:   # 超速
+                reward = -10
+                done = True
 
-            if len(self.collision_history) != 0:
-                done = True
-                reward = -10
-            elif self.distance_from_center > self.max_distance_from_center:
-                done = True
-                reward = -10
-            elif self.episode_start_time + 10 < time.time() and self.velocity < 1.0:
-                reward = -10
-                done = True
-            elif self.velocity > self.max_speed:
-                reward = -10
-                done = True
-
+            # 正常行驶奖励计算
             # Interpolated from 1 when centered to 0 when 3 m from center
-            centering_factor = max(1.0 - self.distance_from_center / self.max_distance_from_center, 0.0)
+            centering_factor = max(1.0 - self.distance_from_center / self.max_distance_from_center, 0.0)  # 车道居中系数（1=完美居中）
             # Interpolated from 1 when aligned with the road to 0 when +/- 30 degress of road
-            angle_factor = max(1.0 - abs(self.angle / np.deg2rad(20)), 0.0)
+            angle_factor = max(1.0 - abs(self.angle / np.deg2rad(20)), 0.0)   # 航向角系数（1=完全对齐道路）
 
             if not done:
-                if self.continous_action_space:
-                    if self.velocity < self.min_speed:
+                if self.continous_action_space:  # 连续动作空间（如油门/刹车连续值）
+                    if self.velocity < self.min_speed:   # 速度过低时线性衰减奖励
                         reward = (self.velocity / self.min_speed) * centering_factor * angle_factor
-                    elif self.velocity > self.target_speed:
-                        reward = (1.0 - (self.velocity - self.target_speed) / (
-                                    self.max_speed - self.target_speed)) * centering_factor * angle_factor
-                    else:
+                    elif self.velocity > self.target_speed:   # 超目标速度时线性衰减奖励
+                        reward = (1.0 - (self.velocity-self.target_speed) / (self.max_speed-self.target_speed)) * centering_factor * angle_factor
+                    else:  # 理想速度区间
                         reward = 1.0 * centering_factor * angle_factor
-                else:
+                else:   # 离散动作空间
                     reward = 1.0 * centering_factor * angle_factor
 
-            if self.timesteps >= 7500:
+            # 回合终止条件
+            if self.timesteps >= 7500:  # 步数超限
                 done = True
-            elif self.current_waypoint_index >= len(self.route_waypoints) - 2:
+            elif self.current_waypoint_index >= len(self.route_waypoints) - 2:  # 接近路线终点
                 done = True
                 self.fresh_start = True
+                # 动态调整检查点频率
                 if self.checkpoint_frequency is not None:
                     if self.checkpoint_frequency < self.total_distance // 2:
                         self.checkpoint_frequency += 2
@@ -339,40 +382,32 @@ class CarlaEnvironment():
                         self.checkpoint_frequency = None
                         self.checkpoint_waypoint_index = 0
 
-            max_wait1 = 100
-            waited1 = 0
-            while len(self.camera_obj.front_camera) == 0 and waited1 < max_wait1:
+            # 获取观测数据
+            while(len(self.camera_obj.front_camera) == 0):
                 time.sleep(0.0001)
-                waited1 += 1
-            if len(self.camera_obj.front_camera) == 0:
-                raise RuntimeError("摄像头图像数据未获取成功，front_camera 为空")
-            self.image_obs = self.camera_obj.front_camera.pop(-1)
-            normalized_velocity = self.velocity / self.target_speed
+
+            self.image_obs = [[self.camera_obj.front_camera.pop(-1)]]  # 保持List[List]结构
+
+            self.brake = self.vehicle.get_control().brake
+            # 构建控制命令观测（包含当前实际控制量）
+            self.control_obs = np.array([
+                self.previous_steer,
+                self.throttle,
+                self.brake,
+                0
+            ], dtype=np.float32)
+            # 速度观测
+            self.speed_obs = np.array([self.velocity], dtype=np.float32)
+
+            normalized_velocity = self.velocity/self.target_speed
             normalized_distance_from_center = self.distance_from_center / self.max_distance_from_center
             normalized_angle = abs(self.angle / np.deg2rad(20))
-            self.navigation_obs = np.array(
-                [self.throttle, self.velocity, normalized_velocity, normalized_distance_from_center, normalized_angle])
+            self.navigation_obs = np.array([self.throttle, self.velocity, normalized_velocity, normalized_distance_from_center, normalized_angle])
 
-            max_wait2 = 100
-            waited2 = 0
-            while len(self.camera_obj.front_camera) == 0 and waited2 < max_wait2:
-                time.sleep(0.0001)
-                waited2 += 1
-            if len(self.camera_obj.front_camera) == 0:
-                raise RuntimeError("摄像头图像数据未获取成功，front_camera 为空")
-            raw_img = self.camera_obj.front_camera.pop(-1)
-            cam_views = []
-            for cam in g_conf.DATA_USED:
-                cam_views.append(self._process_image(raw_img))  # 图像预处理为 Tensor
-            self.frame_buffer.pop(0)  # 移除最早一帧
-            self.frame_buffer.append(cam_views)
-            self.command_tensor = self._get_command_tensor()  # e.g., one-hot 编码 [B, 4]
-            self.speed_tensor = torch.FloatTensor([[self.velocity]])  # 当前速度 [B, 1]
-
-            # Remove everything that has been spawned in the env
+            # Remove everything that has been spawned in the env  # 环境清理
             if done:
-                self.center_lane_deviation = self.center_lane_deviation / self.timesteps
-                self.distance_covered = abs(self.current_waypoint_index - self.checkpoint_waypoint_index)
+                self.center_lane_deviation = self.center_lane_deviation / self.timesteps    # 平均车道偏离度
+                self.distance_covered = abs(self.current_waypoint_index - self.checkpoint_waypoint_index)  # 实际行驶距离
 
                 for sensor in self.sensor_list:
                     sensor.destroy()
@@ -382,8 +417,11 @@ class CarlaEnvironment():
                 for actor in self.actor_list:
                     actor.destroy()
 
-            return self.frame_buffer, [self.command_tensor], [self.speed_tensor], reward, done, [self.distance_covered,
-                                                                                                 self.center_lane_deviation]
+            return {
+                'frames': self.image_obs,         # List[List[np.ndarray]] 图像序列
+                'command': self.control_obs,      # List[np.ndarray] 控制命令
+                'speed': self.speed_obs           # List[np.ndarray] 速度
+            }, reward, done, [self.distance_covered, self.center_lane_deviation]
 
         except:
             self.client.apply_batch([carla.command.DestroyActor(x) for x in self.sensor_list])
@@ -551,4 +589,3 @@ class CarlaEnvironment():
         self.front_camera = None
         self.collision_history = None
         self.wrong_maneuver = None
-
