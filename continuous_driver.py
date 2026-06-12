@@ -16,8 +16,6 @@ from simulation.connection import ClientConnection
 from simulation.environment import CarlaEnvironment
 from parameters import *
 
-import carla
-
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -52,6 +50,7 @@ def runner():
     # ========================================================================
     #                           基本参数 & 日志设置
     # ========================================================================
+
     args = parse_args()
     # exp_name = args.exp_name
     # train = args.train
@@ -83,11 +82,10 @@ def runner():
         "hyperparameters",
         "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}" for key, value in vars(args).items()])))
 
-    # 设置随机数种子以复现结果
+    # Seeding to reproduce the results
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    # 在默认的非确定性模式下，多次执行相同的程序可能会因为内部并行计算的差异而产生略微不同的结果。
     torch.backends.cudnn.deterministic = args.torch_deterministic
 
     action_std_decay_rate = 0.05
